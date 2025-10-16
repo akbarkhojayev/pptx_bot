@@ -1,339 +1,454 @@
 import asyncio
-import os
-from aiogram import Bot, Dispatcher, types, F
-from aiogram.enums import ParseMode
-from aiogram.client.default import DefaultBotProperties
-from aiogram.fsm.context import FSMContext
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
-from aiogram.types import Message, FSInputFile
-from aiogram.filters import Command
-from aiogram.fsm.state import StatesGroup, State
-from aiogram.fsm.storage.memory import MemoryStorage
-import wikipedia
 import logging
+import os
+import random
+import textwrap
+from io import BytesIO
+from typing import List, Tuple, Optional
+import wikipedia
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import CommandStart
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.context import FSMContext
+from aiogram.types import FSInputFile
+from openai import OpenAI
+from pptx import Presentation
+from pptx.dml.color import RGBColor
+from pptx.enum.text import PP_ALIGN
+from pptx.util import Inches, Pt
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler("bot.log", encoding="utf-8"),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
-wikipedia.set_lang('uz')
-API_TOKEN = "7890416134:AAFMbGQieQoJiGO-3HkKC8GA0T0j6RGor-o"
-ADMIN_ID = "5922081119"
+BOT_TOKEN = ""
+OPENAI_API_KEY = ""
 
-bot = Bot(token=API_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-dp = Dispatcher(storage=MemoryStorage())
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
+client = OpenAI(api_key=OPENAI_API_KEY)
+logging.basicConfig(level=logging.INFO)
+wikipedia.set_lang("uz")
 
-main_menu = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="About"), KeyboardButton(text="Projects")],
-        [KeyboardButton(text="Contact"), KeyboardButton(text="Skils")],
-        [KeyboardButton(text="📄 CV"), KeyboardButton(text="✉️ Fikr bildirish")],
-    ],
-    resize_keyboard=True
-)
-cancel_keyboard = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="❌ Bekor qilish")]
-    ],
-    resize_keyboard=True
-)
+class Form(StatesGroup):
+    waiting_for_topic = State()
+    waiting_for_image = State()
+    waiting_for_type = State()
+    waiting_for_more = State()
 
-contact_keyboard = InlineKeyboardMarkup(
-    inline_keyboard=[
-        [InlineKeyboardButton(text="Telegram", url="https://t.me/maxmudov_1117")],
-        # [InlineKeyboardButton(text="Gmail", url="bekmurodmaxmudov122@gmail.com")],
-        [InlineKeyboardButton(text="LinkedIn", url="https://linkedin.com/in/BekmurodMaxmudov")],
-        [InlineKeyboardButton(text="GitHub", url="https://github.com/maxmudov1117")]
-    ]
-)
+BACKGROUND_COLORS = [
+    RGBColor(33, 150, 243),
+    RGBColor(76, 175, 80),
+    RGBColor(255, 152, 0),
+    RGBColor(156, 39, 176),
+    RGBColor(0, 188, 212),
+]
 
-projects_keyboard = InlineKeyboardMarkup(
-    inline_keyboard=[
-        [
-            InlineKeyboardButton(text="KinoBot", callback_data='KinoBot'),
-            InlineKeyboardButton(text="Yordam+", callback_data='Yordam+'),
-            InlineKeyboardButton(text="TarjimonBot", callback_data='TarjimonBot')
-        ]
-    ]
-)
-
-
-@dp.message(Command("start"))
-async def cmd_start(message: Message):
-    logger.info(f"Foydalanuvchi: {message.from_user.full_name} ({message.from_user.id}) /start yubordi")
-    await message.answer("""
-    👋 Assalomu alaykum!  
-Men Bekmurod Maxmudovning rasmiy portfolio botiman.  
-Quyidagi buyruqlar orqali men haqimdagi ma’lumotlarni olishingiz mumkin:
-    """, reply_markup=main_menu)
-
-
-class CVForm(StatesGroup):
-    waiting_for_name = State()
-    waiting_for_surname = State()
-    waiting_for_phone = State()
+# ---------------- PRESENTATION CREATOR ----------------
+def split_text_to_chunks(text: str, max_chars: int = 1200) -> List[str]:
+    """
+    Split a given text into chunks of at most max_chars characters.
+    """
+    import re
+    sentences = re.split(r"(?<=[.!?])\s+", text.strip())
+    chunks, current = [], ""
+    for s in sentences:
+        if len(current) + len(s) + 1 <= max_chars:
+            current = (current + " " + s).strip()
+        else:
+            if current:
+                chunks.append(current.strip())
+            if len(s) > max_chars:
+                chunks.extend(textwrap.wrap(s, max_chars))
+                current = ""
+            else:
+                current = s
+    if current:
+        chunks.append(current.strip())
+    return chunks
 
 
-@dp.message(F.text == "📄 CV")
-async def start_cv_process(message: Message, state: FSMContext):
-    await message.answer("👤 Iltimos, ismingizni kiriting:", reply_markup=cancel_keyboard)
-    await state.set_state(CVForm.waiting_for_name)
+# ---------------- PRESENTATION CREATOR ----------------
+def create_presentation_file(topic: str, plan: List[str], content_chunks: List[str], user_id: int, slide_images: list, large_images: list) -> str:
+    prs = Presentation()
+    prs.slide_height = Inches(7.5)
+    prs.slide_width = Inches(13.3333)
+
+    # Title + Plan slide
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    slide.background.fill.solid()
+    slide.background.fill.fore_color.rgb = RGBColor(25, 118, 210)
+
+    title_box = slide.shapes.add_textbox(Inches(0.6), Inches(0.5), prs.slide_width - Inches(1.2), Inches(1.2))
+    title_tf = title_box.text_frame
+    title_p = title_tf.paragraphs[0]
+    title_p.text = topic
+    title_p.font.size = Pt(44)
+    title_p.font.bold = True
+    title_p.font.color.rgb = RGBColor(255, 255, 255)
+    title_p.alignment = PP_ALIGN.CENTER
+
+    sub_box = slide.shapes.add_textbox(Inches(1.0), Inches(1.9), prs.slide_width - Inches(2.0), Inches(0.6))
+    sub_tf = sub_box.text_frame
+    sp = sub_tf.paragraphs[0]
+    sp.text = "Reja"
+    sp.font.size = Pt(28)
+    sp.font.bold = True
+    sp.font.color.rgb = RGBColor(255, 255, 255)
+    sp.alignment = PP_ALIGN.LEFT
+
+    bullets_box = slide.shapes.add_textbox(Inches(1.0), Inches(2.6), prs.slide_width - Inches(2.0), Inches(4.0))
+    bullets_tf = bullets_box.text_frame
+    bullets_tf.word_wrap = True
+    for item in plan:
+        p = bullets_tf.add_paragraph()
+        p.text = f"• {item}"
+        p.font.size = Pt(18)
+        p.font.color.rgb = RGBColor(255, 255, 255)
+        p.alignment = PP_ALIGN.LEFT
+
+    # Content slides: left = text, right = image
+    left_margin = Inches(0.6)
+    right_margin = Inches(0.6)
+    gap = Inches(0.3)
+    image_width = Inches(4.0)
+    image_height = Inches(4.0)
+    text_top = Inches(1.2)
+    text_height = Inches(5.0)
+
+    # ensure at least 1 image per content slide
+    needed = max(7, len(content_chunks))
+    chunks = content_chunks.copy()
+    # if too few chunks, split long ones
+    if len(chunks) < needed:
+        idx = 0
+        while len(chunks) < needed and idx < len(chunks):
+            if len(chunks[idx]) > 800:
+                extra = split_text_to_chunks(chunks[idx], max_chars=700)
+                # replace this chunk with its parts
+                chunks.pop(idx)
+                for j, part in enumerate(extra):
+                    chunks.insert(idx + j, part)
+            idx += 1
+            if idx >= len(chunks):
+                break
+    final_chunks = chunks[:needed]
+
+    # Ensure minimum text per slide
+    minimum_chars = 400
+    i = 0
+    while i < len(final_chunks) - 1:
+        if len(final_chunks[i]) < minimum_chars:
+            # Merge with next
+            final_chunks[i] += " " + final_chunks[i+1]
+            final_chunks.pop(i+1)
+        else:
+            i += 1
+    # If last is too short and more than one, merge with previous
+    if len(final_chunks) > 1 and len(final_chunks[-1]) < minimum_chars:
+        final_chunks[-2] += " " + final_chunks[-1]
+        final_chunks.pop()
+
+    slide_num = 1
+    for idx, chunk in enumerate(final_chunks):
+        if large_images and idx == len(final_chunks) // 2:
+            # Add large image slide in the middle
+            slide = prs.slides.add_slide(prs.slide_layouts[6])
+            slide.background.fill.solid()
+            slide.background.fill.fore_color.rgb = RGBColor(255, 255, 255)
+            # Add large image
+            img_path = large_images[0]  # Use the first large image
+            try:
+                with open(img_path, "rb") as f:
+                    img_data = f.read()
+                img_stream = BytesIO(img_data)
+                img_stream.seek(0)
+                slide.shapes.add_picture(img_stream, Inches(0.5), Inches(0.5), width=prs.slide_width - Inches(1), height=prs.slide_height - Inches(1))
+            except Exception as e:
+                logging.exception(f"Failed to add large image: {e}")
+
+        slide = prs.slides.add_slide(prs.slide_layouts[6])
+        slide.background.fill.solid()
+        slide.background.fill.fore_color.rgb = RGBColor(255, 255, 255)
+
+        # Heading
+        title_box = slide.shapes.add_textbox(left_margin, Inches(0.5), prs.slide_width - left_margin - right_margin, Inches(1.0))
+        tf = title_box.text_frame
+        p = tf.paragraphs[0]
+        heading = f"{slide_num}. {plan[idx] if idx < len(plan) else topic}"
+        p.text = heading
+        p.font.size = Pt(24)
+        p.font.bold = True
+        p.font.color.rgb = RGBColor(0, 0, 0)
+        p.alignment = PP_ALIGN.LEFT
+
+        # Text
+        if slide_images and idx < len(slide_images):
+            # With image: left column
+            content_box_width = prs.slide_width - left_margin - right_margin - image_width - gap
+            content_box = slide.shapes.add_textbox(left_margin, text_top, content_box_width, text_height)
+            content_tf = content_box.text_frame
+            content_tf.word_wrap = True
+            for part in split_text_to_chunks(chunk, max_chars=600):
+                para = content_tf.add_paragraph()
+                para.text = part
+                para.font.size = Pt(16)
+                para.font.name = "Segoe UI"
+                para.font.color.rgb = RGBColor(0, 0, 0)
+                para.alignment = PP_ALIGN.JUSTIFY
+
+            # Image (right column)
+            img_path = slide_images[idx]
+            try:
+                with open(img_path, "rb") as f:
+                    img_bytes = f.read()
+                img_stream = BytesIO(img_bytes)
+                img_stream.seek(0)
+                slide.shapes.add_picture(img_stream, left_margin + content_box_width + gap, text_top, width=image_width, height=image_height)
+            except Exception as e:
+                logging.exception(f"Failed to add picture on slide {idx+1}: {e}")
+        else:
+            # No image: full width, centered
+            content_box = slide.shapes.add_textbox(left_margin, text_top, prs.slide_width - left_margin - right_margin, text_height)
+            content_tf = content_box.text_frame
+            content_tf.word_wrap = True
+            for part in split_text_to_chunks(chunk, max_chars=800):  # More chars since full width
+                para = content_tf.add_paragraph()
+                para.text = part
+                para.font.size = Pt(18)  # Slightly larger
+                para.font.name = "Segoe UI"
+                para.font.color.rgb = RGBColor(0, 0, 0)
+                para.alignment = PP_ALIGN.JUSTIFY
+
+        slide_num += 1
+
+    # Final "Thank you" slide
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    slide.background.fill.solid()
+    slide.background.fill.fore_color.rgb = RGBColor(255, 255, 255)
+    box = slide.shapes.add_textbox(Inches(1), Inches(2.5), prs.slide_width - Inches(2), Inches(3))
+    tf = box.text_frame
+    p = tf.paragraphs[0]
+    p.text = "ETIBORINGIZ UCHUN RAHMAT!"
+    p.font.size = Pt(48)
+    p.font.bold = True
+    p.font.color.rgb = RGBColor(0, 0, 0)
+    p.alignment = PP_ALIGN.CENTER
+
+    filename = f"{topic.replace(' ', '_')}.pptx"
+    prs.save(filename)
+    return filename
 
 
-@dp.message(F.text == "❌ Bekor qilish")
-async def cancel_cv_process(message: Message, state: FSMContext):
-    current_state = await state.get_state()
-    if current_state is not None:
-        await state.clear()
-        await message.answer("❌ CV jarayoni bekor qilindi.", reply_markup=main_menu)
-    else:
-        await message.answer("❗ Hozirda bekor qilinadigan jarayon yo‘q.", reply_markup=main_menu)
+# ---------------- OPENAI TEXT GENERATION ----------------
+def generate_plan_and_contents(topic: str) -> Tuple[List[str], List[str]]:
+    try:
+        wiki = wikipedia.summary(topic, sentences=6)
+    except Exception:
+        wiki = ""
 
+    user_prompt = f"""
+Mavzu: {topic}
+Wikipedia: {wiki}
 
-@dp.message(CVForm.waiting_for_name)
-async def get_name(message: Message, state: FSMContext):
-    if message.text == "❌ Bekor qilish":
-        await cancel_cv_process(message, state)
-        return
-    await state.update_data(name=message.text)
-    await message.answer("👥 Familiyangizni kiriting:", reply_markup=cancel_keyboard)
-    await state.set_state(CVForm.waiting_for_surname)
+Vazifa:
+1) 4-5 banddan iborat reja tuzing (raqamlangan), 5 - bu xulosa bolsin.
+2) Har band uchun 300-500 so'zli tushunarli matn yozing.
+3) Matn misollar bilan bo'lsin va oxirida qisqacha xulosa yozing.
 
-
-@dp.message(CVForm.waiting_for_surname)
-async def get_surname(message: Message, state: FSMContext):
-    if message.text == "❌ Bekor qilish":
-        await cancel_cv_process(message, state)
-        return
-    await state.update_data(surname=message.text)
-    await message.answer("📞 Telefon raqamingizni kiriting (masalan: +998901234567):", reply_markup=cancel_keyboard)
-    await state.set_state(CVForm.waiting_for_phone)
-
-
-@dp.message(CVForm.waiting_for_phone)
-async def get_phone_and_send_cv(message: Message, state: FSMContext):
-    if message.text == "❌ Bekor qilish":
-        await cancel_cv_process(message, state)
-        return
-
-    phone = message.text.strip()
-
-    if not phone.startswith("+998") or len(phone) != 13:
-        await message.answer("❌ Telefon raqam noto‘g‘ri formatda. Iltimos, +998 bilan kiriting:",
-                             reply_markup=cancel_keyboard)
-        return
-
-    data = await state.get_data()
-    name = data.get("name")
-    surname = data.get("surname")
-    logging.info(f"CV yuborildi: {name} {surname}, tel: {phone}, user: {message.from_user.id}")
-    user_info = f"📥 CV so‘rov:\nIsm: {name}\nFamiliya: {surname}\nTelefon: {phone}\nUser: @{message.from_user.username or 'yo‘q'}"
-    await bot.send_message(chat_id=int(ADMIN_ID), text=user_info)
+Natija quyidagi formatda bo'lsin:
+Reja:
+1. ...
+2. ...
+Matnlar:
+1. ...
+2. ...
+"""
 
     try:
-        resume = FSInputFile("files/resume.pdf")
-        await message.answer_document(resume, caption="📄 Mana mening CV faylim. Rahmat!", reply_markup=main_menu)
-    except:
-        await message.answer("❌ Kechirasiz, CV fayli topilmadi.", reply_markup=main_menu)
-
-    await state.clear()
-
-
-feedback_users = set()
-feedback_storage = {}
-feedback_counter = 0
-
-
-class FeedbackReply(StatesGroup):
-    waiting_for_reply = State()
-
-
-@dp.message(lambda message: message.text == "✉️ Fikr bildirish")
-async def ask_feedback(message: types.Message):
-    feedback_users.add(message.from_user.id)
-    await message.answer("✍️ Fikringizni yozing. Uni shaxsan adminga yuboraman.")
-
-
-@dp.message(FeedbackReply.waiting_for_reply)
-async def process_reply(message: Message, state: FSMContext):
-    if str(message.from_user.id) != ADMIN_ID:
-        await message.answer("❌ Bu buyruq faqat admin uchun!")
-        await state.clear()
-        return
-
-    data = await state.get_data()
-    feedback_id = data.get("feedback_id")
-
-    if feedback_id is None or int(feedback_id) not in feedback_storage:
-        await message.answer("❌ Bunday fikr ID topilmadi!")
-        await state.clear()
-        return
-
-    feedback_id = int(feedback_id)
-    user_id = feedback_storage[feedback_id]["user_id"]
-    reply_text = message.text
-
-    try:
-        await bot.send_message(chat_id=user_id, text=f"📩 Admin javobi: {reply_text}")
-        await message.answer(f"✅ Fikr ID {feedback_id} ga javob yuborildi.", reply_markup=main_menu)
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "Siz professional taqdimot yaratuvchisiz."},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.6,
+            max_tokens=3000,
+        )
+        raw = resp.choices[0].message.content.strip()
+        # Clean unnecessary characters
+        import re
+        raw = re.sub(r'[*#]', '', raw)
     except Exception as e:
-        await message.answer(f"❌ Xatolik yuz berdi: {str(e)}")
-    finally:
+        logging.exception("OpenAI xatosi:")
+        # fallback simple content
+        plan = ["Kirish", "Asosiy tushunchalar", "Amaliy misollar", "Muammolar va echimlar", "Xulosa"]
+        contents = ["Kirish: mavzu haqida umumiy ma'lumot."] * 5
+        return plan, contents
+
+    plan = []
+    contents = []
+    if "Reja:" in raw and "Matnlar:" in raw:
+        try:
+            plan_part = raw.split("Matnlar:")[0].replace("Reja:", "").strip()
+            text_part = raw.split("Matnlar:")[1].strip()
+            for line in plan_part.splitlines():
+                line = line.strip()
+                if line and (line[0].isdigit() or line.startswith("-")):
+                    if "." in line:
+                        plan.append(line.split(".", 1)[1].strip())
+                    else:
+                        plan.append(line.lstrip("- ").strip())
+            cur_idx = 0
+            current_texts = {}
+            for line in text_part.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
+                if line[0].isdigit() and "." in line[:3]:
+                    idx = int(line.split(".", 1)[0].strip())
+                    rest = line.split(".", 1)[1].strip()
+                    current_texts[idx] = rest
+                    cur_idx = idx
+                else:
+                    if cur_idx == 0:
+                        current_texts.setdefault(1, "")
+                        current_texts[1] += " " + line
+                    else:
+                        current_texts[cur_idx] = current_texts.get(cur_idx, "") + " " + line
+            max_idx = max(current_texts.keys()) if current_texts else 0
+            for i in range(1, max_idx + 1):
+                contents.append(current_texts.get(i, "").strip())
+        except Exception:
+            plan = ["Kirish", "Asosiy tushunchalar", "Amaliy misollar", "Muammolar va echimlar", "Xulosa"]
+            contents = ["Kirish: mavzu haqida umumiy ma'lumot."] * 5
+    else:
+        # fallback simple split
+        lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+        plan = lines[:5]
+        contents = [" ".join(lines[5:]) or "Ma'lumot yetishmadi."] * len(plan)
+
+    # ensure equal lengths
+    while len(contents) < len(plan):
+        contents.append("Ma'lumot yetishmadi — iltimos mavzuni kengroq yozing.")
+
+    return plan, contents
+
+
+# ---------------- BOT HANDLERS ----------------
+@dp.message(CommandStart())
+async def cmd_start(message: types.Message, state: FSMContext):
+    await state.clear()
+    await message.answer(
+        "👋 Salom! Men AI Prezentatsiya Botman.\n\n"
+        "Prezentatsiya yaratish uchun mavzu kiriting:"
+    )
+    await state.set_state(Form.waiting_for_topic)
+
+
+@dp.message(F.photo, Form.waiting_for_more)
+async def handle_additional_photo(message: types.Message, state: FSMContext):
+    photo = message.photo[-1]
+    file = await bot.get_file(photo.file_id)
+    data = await state.get_data()
+    img_index = len(data.get('slide_images', [])) + len(data.get('large_images', []))
+    user_img_path = f"user_image_{message.from_user.id}_{img_index}.png"
+    await bot.download_file(file.file_path, user_img_path)
+    await state.update_data(last_img_path=user_img_path)
+    await message.reply("🖼 Rasm yuklandi! Bu rasmni qayerda ishlatmoqchisiz?\n- 'asosiy' - Katta sahifada\n- 'matn' - Matn sahifalarida")
+    await state.set_state(Form.waiting_for_type)
+
+
+@dp.message(F.photo, Form.waiting_for_image)
+async def handle_photo(message: types.Message, state: FSMContext):
+    photo = message.photo[-1]
+    file = await bot.get_file(photo.file_id)
+    data = await state.get_data()
+    img_index = len(data.get('slide_images', [])) + len(data.get('large_images', []))
+    user_img_path = f"user_image_{message.from_user.id}_{img_index}.png"
+    await bot.download_file(file.file_path, user_img_path)
+    await state.update_data(last_img_path=user_img_path)
+    await message.reply("🖼 Rasm yuklandi! Bu rasmni qayerda ishlatmoqchisiz?\n- 'asosiy' - Katta sahifada\n- 'matn' - Matn sahifalarida")
+    await state.set_state(Form.waiting_for_type)
+
+
+@dp.message(Form.waiting_for_type)
+async def handle_type(message: types.Message, state: FSMContext):
+    data = await state.get_data()
+    img_path = data.get('last_img_path')
+    if not img_path:
+        await message.reply("Xatolik yuz berdi. Qaytadan boshlang.")
         await state.clear()
+        return
+    typ = message.text.lower().strip()
+    if typ == 'asosiy':
+        large_images = data.get('large_images', [])
+        large_images.append(img_path)
+        await state.update_data(large_images=large_images)
+    elif typ == 'matn':
+        slide_images = data.get('slide_images', [])
+        slide_images.append(img_path)
+        await state.update_data(slide_images=slide_images)
+    else:
+        await state.clear()
+        await message.reply("Noto'g'ri javob. Qaytadan boshlang: /start")
+        return
+    await message.reply("✅ Rasm saqlandi! Yana rasm yuklamoqchimisiz? 'done' yozing")
+    await state.set_state(Form.waiting_for_more)
+@dp.message(Form.waiting_for_topic)
+async def handle_topic_input(message: types.Message, state: FSMContext):
+    topic = message.text.strip()
+    if not topic:
+        await message.reply("Iltimos, mavzuni yozing.")
+        return
+    await state.update_data(topic=topic, slide_images=[], large_images=[])
+    await message.answer("✅ Mavzu saqlandi.\n\nEndi prezentatsiya uchun rasm yuboring yoki 'skip' yozing (rasmsiz yaratish uchun):")
+    await state.set_state(Form.waiting_for_image)
+
+
+@dp.message(Form.waiting_for_more)
+async def handle_more(message: types.Message, state: FSMContext):
+    if message.text and message.text.lower().strip() == "done":
+        data = await state.get_data()
+        topic = data.get("topic")
+        slide_images = data.get('slide_images', [])
+        large_images = data.get('large_images', [])
+        await state.clear()
+        await message.reply("Prezentatsiya yaratilmoqda...")
+        await create_presentation(message, topic, slide_images, large_images)
+    else:
+        await message.reply("Yana rasm yuklamoqchimisiz? 'done' yozing")
 
 
 @dp.message()
-async def buttons(message: types.Message, state: FSMContext):
-    global feedback_counter
-    current_state = await state.get_state()
-    if current_state is not None:
-        await message.answer("❗ Iltimos, avval CV jarayonini yakunlang yoki bekor qiling.",
-                             reply_markup=cancel_keyboard)
-        return
+async def handle_unknown(message: types.Message):
+    await message.reply("Boshlash uchun /start ni bosing.")
+async def create_presentation(message: types.Message, topic: str, slide_images: list, large_images: list):
+    await message.answer(f"🔍 '{topic}' bo'yicha ma'lumotlar olinmoqda...")
+    loop = asyncio.get_event_loop()
+    plan, contents = await loop.run_in_executor(None, generate_plan_and_contents, topic)
 
-    if message.from_user.id in feedback_users:
-        feedback_users.discard(message.from_user.id)
+    content_chunks = []
+    for text in contents:
+        content_chunks.extend(split_text_to_chunks(text, max_chars=800))
 
-        user = message.from_user
-        feedback_counter += 1
-        feedback_storage[feedback_counter] = {
-            "user_id": user.id,
-            "username": user.username or "username yo‘q",
-            "text": message.text
-        }
+    await message.answer("🎨 Dizayn va rasm tanlanmoqda, fayl yaratilmoqda...")
+    pptx_path = await loop.run_in_executor(None, create_presentation_file, topic, plan, content_chunks, message.from_user.id, slide_images, large_images)
 
-        reply_keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[
-                [InlineKeyboardButton(text="✍️ Javob berish", callback_data=f"reply_{feedback_counter}")]
-            ]
-        )
+    await message.answer("✅ Prezentatsiya tayyor! Yuklab olayotganman...")
+    await message.answer_document(FSInputFile(pptx_path))
 
-        text = (
-            f"✉️ <b>Yangi fikr keldi (ID: {feedback_counter})</b>\n\n"
-            f"<b>Fikr:</b> {message.text}\n"
-            f"<b>Foydalanuvchi:</b> @{user.username or 'username yo‘q'}\n"
-            f"<b>User ID:</b> {user.id}"
-        )
+    try:
+        os.remove(pptx_path)
+    except Exception:
+        pass
 
-        await bot.send_message(chat_id=int(ADMIN_ID), text=text, reply_markup=reply_keyboard)
-        await message.answer("✅ Fikringiz uchun rahmat!", reply_markup=main_menu)
-    if message.text == "About":
-        await message.answer("""
-            👨‍💻 Men Bekmurod Maxmudov.  
-        Toshkent Axborot Texnologiyalari Universitetining Farg‘ona filialida Kompyuter injiniringi yo‘nalishida tahsil olaman.
-
-        🧠 Qiziqishlarim:
-        - Python backend dasturlash
-        - Telegram botlar yaratish
-        - NoCode ilovalar (Adalo, FlutterFlow)
-        - AI loyihalar
-
-        🎯 Maqsadim — zamonaviy texnologiyalar orqali foydali loyihalar yaratish va ularni jamiyatga tatbiq etish.
-            """)
-    elif message.text == "Projects":
-        await message.answer("""
-           🛠 Mening ba’zi loyihalarim:
-
-           1️⃣ **KinoBot** — Telegram orqali kinolar haqida ma'lumot beruvchi bot. (Rasm, kategoriya, trailer bilan)
-           2️⃣ **Yordam+** — Tez yordam chaqirish va AI psixologik maslahat beruvchi mobil ilova (FlutterFlow + OpenAI API)
-           3️⃣ **TarjimonBot** — PDF va Word fayllardan matn ajratib, 3 tilda tarjima qiluvchi Telegram bot
-           4️⃣ **O‘quv markazi CRM** — Flask va SQLite3 asosida darslar, o‘quvchilar, to‘lovlar boshqaruvi tizimi
-           """, reply_markup=projects_keyboard)
-
-    elif message.text == "Skils":
-        await message.answer("""
-            🧰 Menda mavjud texnik ko‘nikmalar:
-
-            👨‍💻 Dasturlash:
-            - Python, HTML, CSS
-            - Flask, aiogram
-            - SQL (SQLite, MySQL)
-
-            📱 Ilovalar:
-            - Adalo, FlutterFlow (NoCode)
-            - Telegram Bot API
-            - Google Sheets API
-
-            🧠 Boshqa:
-            - Git & GitHub
-            - Canva, Figma, PowerPoint
-            - Matematika, statistika asoslari
-            """)
-    elif message.text == "Contact":
-        await message.answer("📞 Mening kontaktlarim:", reply_markup=contact_keyboard)
-
-    elif message.text == "Wikipedia":
-        await message.answer(
-            "Salom, Wikipedia Botiga xush kelibsiz! \n"
-            "Botdan foydalanish uchun qidirmoqchi bo'lgan jumlangizni kiriting! \n"
-            "Masalan:Wikipedia: 'O'zbekiston'"
-        )
-    elif message.text.startswith("Wikipedia:"):
-        query = message.text.replace("Wikipedia:", "").strip()
+    # Clean up user images after use
+    all_images = slide_images + large_images
+    for img_path in all_images:
         try:
-            response = wikipedia.summary(query)
-            await message.answer(response)
-        except:
-            await message.answer("❌ Bunday maqola mavjud emas!")
-
-
-@dp.callback_query()
-async def handle_callbacks(callback: CallbackQuery, state: FSMContext):
-    data = callback.data
-    if data.startswith("reply_"):
-        feedback_id = int(data.replace("reply_", ""))
-        if feedback_id in feedback_storage:
-            await state.update_data(feedback_id=feedback_id)
-            await callback.message.answer(
-                f"📝 Fikr ID {feedback_id} ga javob yozing:",
-                reply_markup=cancel_keyboard
-            )
-            await state.set_state(FeedbackReply.waiting_for_reply)
-        else:
-            await callback.message.answer("❌ Bunday fikr ID topilmadi.")
-        await callback.answer()
-        return
-
-    if data == "KinoBot":
-        await callback.message.answer("""
-        💬 1. Kino izlash boti – @Kinokod11_bot
-        🎬 Foydalanuvchilar kinoni nomi orqali izlaydi
-        📦 JSON bazasidan ma’lumotlarni chiqaradi
-        🔍 Inline mode qo‘llab-quvvatlanadi
-        🧠 Eng ko‘p izlanuvchi kinolar bo‘yicha statistikasi bor
-        🧪 Texnologiyalar: Python, Flask, SQLite, Telegram API
-        """)
-    elif data == "Yordam+":
-        await    callback.message.answer("""
-        📚 2. Yordam+ ilovasi – FlutterFlow + OpenAI API
-        🚑 Tez yordam chaqirish funksiyasi
-        🧠 AI asosida psixologik maslahatlar
-        📱 NoCode bilan qurilgan UI/UX
-        🔐 Ro‘yxatdan o‘tish, geolokatsiya bilan ishlash
-        """)
-    elif data == "TarjimonBot":
-        await callback.message.answer("""
-        🧾 3. Hujjat tarjima boti – @tarjimon_bot\n
-        🌍 Ruscha, Inglizcha, O‘zbekcha tillar orasida tarjima\n
-        📄 PDF va Word hujjatlar yuklab olinadi\n
-        📌 Fayldan matnni ajratish va tarjima qilish\n
-        🧪 Texnologiyalar: python-docx, pdfminer, Google Translate API\n
-        """)
-    else:
-        await callback.message.answer("❗Nomaʼlum loyiha!")
-    await callback.answer()
-
-
-async def main():
-    print("Bot ishaga tushdi !!!")
-    await dp.start_polling(bot)
+            if os.path.exists(img_path):
+                os.remove(img_path)
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    logging.info("🚀 Bot ishga tushmoqda...")
+    asyncio.run(dp.start_polling(bot))
