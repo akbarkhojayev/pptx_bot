@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import math
 import os
 import random
 import re
@@ -166,18 +167,34 @@ def add_footer(slide, theme: dict, topic: str, page_no: int, prs_width) -> None:
     np_.alignment = PP_ALIGN.RIGHT
 
 
-def estimate_font_size(char_count: int, box_w_emu: int, box_h_emu: int, sizes: Tuple[int, ...]) -> int:
-    """Pick the largest font size (pt) from `sizes` whose estimated text capacity covers char_count,
+def _text_block_height_pt(paragraphs: List[str], size: int, box_w_pt: float, line_spacing: float, space_after_pt: float) -> float:
+    """Height (pt) needed to lay out `paragraphs` at font `size` in a box `box_w_pt` wide.
+    Calibrated against real LibreOffice-rendered glyph positions (see project notes):
+    average glyph width ~0.5x font size, and line height is ~1.2x font size (base leading)
+    times the paragraph's line_spacing multiplier -- e.g. at size=19/line_spacing=1.2 this
+    predicts 27.4pt between lines, matching the 27.3pt actually measured."""
+    avg_char_w_pt = size * 0.5
+    chars_per_line = max(1, box_w_pt / avg_char_w_pt)
+    line_h_pt = size * 1.2 * line_spacing
+    total_lines = sum(max(1, math.ceil(len(p) / chars_per_line)) for p in paragraphs)
+    return total_lines * line_h_pt + max(0, len(paragraphs) - 1) * space_after_pt
+
+
+def pick_font_size(
+    paragraphs: List[str],
+    box_w_emu: int,
+    box_h_emu: int,
+    sizes: Tuple[int, ...],
+    line_spacing: float = 1.2,
+    space_after_fn=lambda size: max(6, size // 2),
+) -> int:
+    """Pick the largest font size (pt) from `sizes` whose paragraphs fit box_h_emu tall,
     so slide text never overflows its box regardless of how long the source content is."""
     box_w_pt = box_w_emu / 12700
-    box_h_pt = box_h_emu / 12700
+    box_h_pt = box_h_emu / 12700 * 0.95  # small safety margin
     for size in sizes:
-        avg_char_w_pt = size * 0.52
-        line_h_pt = size * 1.3  # includes line spacing + paragraph-break overhead
-        chars_per_line = box_w_pt / avg_char_w_pt
-        n_lines = box_h_pt / line_h_pt
-        capacity = chars_per_line * n_lines * 0.9  # safety margin
-        if char_count <= capacity:
+        needed = _text_block_height_pt(paragraphs, size, box_w_pt, line_spacing, space_after_fn(size))
+        if needed <= box_h_pt:
             return size
     return sizes[-1]
 
@@ -229,7 +246,8 @@ def create_presentation_file(topic: str, plan: List[str], content_chunks: List[s
     add_gradient_bg(slide, theme["primary_dark"], theme["primary"], angle=45)
 
     add_decor_circle(slide, sw - Inches(2.6), Inches(-2.0), Inches(5.2), RGBColor(255, 255, 255), alpha_pct=8)
-    add_decor_circle(slide, Inches(-1.6), sh - Inches(2.2), Inches(3.6), theme["accent"], alpha_pct=18)
+    # (no bottom-left decoration here: the plan list can grow to ~9 items and fill that corner,
+    # and a background circle behind the text created a patchy, "broken"-looking backdrop)
 
     title_box = slide.shapes.add_textbox(Inches(0.9), Inches(0.7), sw - Inches(1.8), Inches(1.5))
     title_tf = title_box.text_frame
@@ -398,10 +416,11 @@ def create_presentation_file(topic: str, plan: List[str], content_chunks: List[s
         num_badge.line.fill.background()
         no_shadow(num_badge)
         nbtf = num_badge.text_frame
+        nbtf.word_wrap = False
         nbtf.vertical_anchor = MSO_ANCHOR.MIDDLE
         nbp = nbtf.paragraphs[0]
         nbp.text = str(slide_num)
-        nbp.font.size = Pt(20)
+        nbp.font.size = Pt(20) if slide_num < 10 else Pt(15)
         nbp.font.bold = True
         nbp.font.name = FONT_BODY
         nbp.font.color.rgb = RGBColor(255, 255, 255)
@@ -415,7 +434,7 @@ def create_presentation_file(topic: str, plan: List[str], content_chunks: List[s
         p = tf.paragraphs[0]
         heading = plan[idx] if idx < len(plan) else topic
         p.text = heading
-        p.font.size = Pt(estimate_font_size(len(heading), title_box_w, Inches(0.85), sizes=(26, 24, 22, 20, 18)))
+        p.font.size = Pt(pick_font_size([heading], title_box_w, Inches(0.85), sizes=(26, 24, 22, 20, 18), line_spacing=1.0, space_after_fn=lambda s: 0))
         p.font.bold = True
         p.font.name = FONT_HEADING
         p.font.color.rgb = theme["primary"]
@@ -430,8 +449,9 @@ def create_presentation_file(topic: str, plan: List[str], content_chunks: List[s
             content_box = slide.shapes.add_textbox(left_margin, text_top, content_box_width, text_height)
             content_tf = content_box.text_frame
             content_tf.word_wrap = True
-            body_size = estimate_font_size(len(chunk), content_box_width, text_height, sizes=(17, 16, 15, 14, 13, 12))
-            for part in split_text_to_chunks(chunk, max_chars=600):
+            paragraphs = split_text_to_chunks(chunk, max_chars=600)
+            body_size = pick_font_size(paragraphs, content_box_width, text_height, sizes=(17, 16, 15, 14, 13, 12, 11), line_spacing=1.15)
+            for part in paragraphs:
                 para = content_tf.add_paragraph()
                 para.text = part
                 para.font.size = Pt(body_size)
@@ -466,8 +486,9 @@ def create_presentation_file(topic: str, plan: List[str], content_chunks: List[s
             content_box = slide.shapes.add_textbox(left_margin, text_top, full_width, text_height)
             content_tf = content_box.text_frame
             content_tf.word_wrap = True
-            body_size = estimate_font_size(len(chunk), full_width, text_height, sizes=(19, 18, 17, 16, 15, 14, 13))
-            for part in split_text_to_chunks(chunk, max_chars=800):  # More chars since full width
+            paragraphs = split_text_to_chunks(chunk, max_chars=800)  # More chars since full width
+            body_size = pick_font_size(paragraphs, full_width, text_height, sizes=(19, 18, 17, 16, 15, 14, 13, 12), line_spacing=1.2)
+            for part in paragraphs:
                 para = content_tf.add_paragraph()
                 para.text = part
                 para.font.size = Pt(body_size)
