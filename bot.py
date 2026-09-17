@@ -166,6 +166,22 @@ def add_footer(slide, theme: dict, topic: str, page_no: int, prs_width) -> None:
     np_.alignment = PP_ALIGN.RIGHT
 
 
+def estimate_font_size(char_count: int, box_w_emu: int, box_h_emu: int, sizes: Tuple[int, ...]) -> int:
+    """Pick the largest font size (pt) from `sizes` whose estimated text capacity covers char_count,
+    so slide text never overflows its box regardless of how long the source content is."""
+    box_w_pt = box_w_emu / 12700
+    box_h_pt = box_h_emu / 12700
+    for size in sizes:
+        avg_char_w_pt = size * 0.52
+        line_h_pt = size * 1.3  # includes line spacing + paragraph-break overhead
+        chars_per_line = box_w_pt / avg_char_w_pt
+        n_lines = box_h_pt / line_h_pt
+        capacity = chars_per_line * n_lines * 0.9  # safety margin
+        if char_count <= capacity:
+            return size
+    return sizes[-1]
+
+
 def fit_dimensions(img_path: str, max_w: int, max_h: int) -> Tuple[int, int]:
     """Return (width, height) in EMU that fit inside max_w x max_h, preserving aspect ratio."""
     try:
@@ -243,11 +259,22 @@ def create_presentation_file(topic: str, plan: List[str], content_chunks: List[s
     bp.font.color.rgb = RGBColor(255, 255, 255)
     bp.alignment = PP_ALIGN.CENTER
 
-    item_y = Inches(3.15)
-    item_h = Inches(0.68)
-    badge_d = Inches(0.42)
+    n_items = max(len(plan), 1)
+    list_top = Inches(3.15)
+    list_bottom = sh - Inches(0.35)
+    item_h = min(Inches(0.72), int((list_bottom - list_top) / n_items))
+    badge_d = min(Inches(0.42), max(Inches(0.26), item_h - Inches(0.14)))
+    if item_h >= Inches(0.6):
+        item_font, num_font = Pt(19), Pt(16)
+    elif item_h >= Inches(0.45):
+        item_font, num_font = Pt(15), Pt(13)
+    else:
+        item_font, num_font = Pt(12), Pt(11)
+
+    item_y = list_top
     for i, item in enumerate(plan, start=1):
-        num = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(0.9), item_y, badge_d, badge_d)
+        badge_y = item_y + (item_h - badge_d) // 2
+        num = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(0.9), badge_y, badge_d, badge_d)
         num.fill.solid()
         num.fill.fore_color.rgb = theme["accent"]
         num.line.color.rgb = RGBColor(255, 255, 255)
@@ -257,19 +284,19 @@ def create_presentation_file(topic: str, plan: List[str], content_chunks: List[s
         ntf.vertical_anchor = MSO_ANCHOR.MIDDLE
         np_ = ntf.paragraphs[0]
         np_.text = str(i)
-        np_.font.size = Pt(16)
+        np_.font.size = num_font
         np_.font.bold = True
         np_.font.name = FONT_BODY
         np_.font.color.rgb = RGBColor(255, 255, 255)
         np_.alignment = PP_ALIGN.CENTER
 
-        text_box = slide.shapes.add_textbox(Inches(1.55), item_y - Inches(0.06), sw - Inches(2.6), item_h)
+        text_box = slide.shapes.add_textbox(Inches(1.55), item_y, sw - Inches(2.6), item_h)
         ttf = text_box.text_frame
         ttf.word_wrap = True
         ttf.vertical_anchor = MSO_ANCHOR.MIDDLE
         tp = ttf.paragraphs[0]
         tp.text = item
-        tp.font.size = Pt(19)
+        tp.font.size = item_font
         tp.font.name = FONT_BODY
         tp.font.color.rgb = RGBColor(255, 255, 255)
         tp.alignment = PP_ALIGN.LEFT
@@ -380,14 +407,15 @@ def create_presentation_file(topic: str, plan: List[str], content_chunks: List[s
         nbp.font.color.rgb = RGBColor(255, 255, 255)
         nbp.alignment = PP_ALIGN.CENTER
 
-        title_box = slide.shapes.add_textbox(left_margin + badge_d2 + Inches(0.25), Inches(0.5), sw - left_margin - right_margin - badge_d2 - Inches(0.25), Inches(0.75))
+        title_box_w = sw - left_margin - right_margin - badge_d2 - Inches(0.25)
+        title_box = slide.shapes.add_textbox(left_margin + badge_d2 + Inches(0.25), Inches(0.45), title_box_w, Inches(0.85))
         tf = title_box.text_frame
         tf.word_wrap = True
         tf.vertical_anchor = MSO_ANCHOR.MIDDLE
         p = tf.paragraphs[0]
         heading = plan[idx] if idx < len(plan) else topic
         p.text = heading
-        p.font.size = Pt(26)
+        p.font.size = Pt(estimate_font_size(len(heading), title_box_w, Inches(0.85), sizes=(26, 24, 22, 20, 18)))
         p.font.bold = True
         p.font.name = FONT_HEADING
         p.font.color.rgb = theme["primary"]
@@ -402,15 +430,16 @@ def create_presentation_file(topic: str, plan: List[str], content_chunks: List[s
             content_box = slide.shapes.add_textbox(left_margin, text_top, content_box_width, text_height)
             content_tf = content_box.text_frame
             content_tf.word_wrap = True
+            body_size = estimate_font_size(len(chunk), content_box_width, text_height, sizes=(17, 16, 15, 14, 13, 12))
             for part in split_text_to_chunks(chunk, max_chars=600):
                 para = content_tf.add_paragraph()
                 para.text = part
-                para.font.size = Pt(16)
+                para.font.size = Pt(body_size)
                 para.font.name = FONT_BODY
                 para.font.color.rgb = theme["text"]
                 para.alignment = PP_ALIGN.JUSTIFY
                 para.line_spacing = 1.15
-                para.space_after = Pt(10)
+                para.space_after = Pt(max(6, body_size // 2))
 
             add_rect(slide, left_margin + content_box_width + gap / 2, text_top, Pt(1.2), text_height, lighten(theme["primary"], 0.55))
 
@@ -433,18 +462,20 @@ def create_presentation_file(topic: str, plan: List[str], content_chunks: List[s
                 logging.exception(f"Failed to add picture on slide {idx+1}: {e}")
         else:
             # No image: full width, centered
-            content_box = slide.shapes.add_textbox(left_margin, text_top, sw - left_margin - right_margin, text_height)
+            full_width = sw - left_margin - right_margin
+            content_box = slide.shapes.add_textbox(left_margin, text_top, full_width, text_height)
             content_tf = content_box.text_frame
             content_tf.word_wrap = True
+            body_size = estimate_font_size(len(chunk), full_width, text_height, sizes=(19, 18, 17, 16, 15, 14, 13))
             for part in split_text_to_chunks(chunk, max_chars=800):  # More chars since full width
                 para = content_tf.add_paragraph()
                 para.text = part
-                para.font.size = Pt(18)  # Slightly larger
+                para.font.size = Pt(body_size)
                 para.font.name = FONT_BODY
                 para.font.color.rgb = theme["text"]
                 para.alignment = PP_ALIGN.JUSTIFY
                 para.line_spacing = 1.2
-                para.space_after = Pt(12)
+                para.space_after = Pt(max(6, body_size // 2))
 
         add_footer(slide, theme, topic, slide_num, sw)
         slide_num += 1
@@ -529,6 +560,16 @@ def _parse_plan_response(raw: str) -> Tuple[List[str], List[str]]:
     return plan, contents
 
 
+GROQ_SYSTEM_PROMPT = """Siz "PPT Yordamchi" — professional prezentatsiya strukturasi va kontent bo'yicha mutaxassissiz.
+
+Har bir mavzu uchun avval uning turini o'zingiz aniqlang (ilmiy/diplom, biznes/startup yoki ta'lim/dars) va rejani o'sha turga mos tuzing:
+- Ilmiy/diplom uslubidagi mavzular uchun: kirish, maqsad va vazifalar, nazariy asoslar, amaliy/tahliliy qism, natijalar, xulosa kabi ketma-ketlikka moslashtiring.
+- Biznes/startup uslubidagi mavzular uchun: muammo, yechim, bozor/qo'llanilish sohasi, ustunliklar, amaliyot, istiqbollar kabi ketma-ketlikka moslashtiring.
+- Umumiy ta'lim/dars mavzulari uchun: kirish, asosiy tushunchalar, tarixi yoki rivojlanishi, turlari/tasnifi, amaliy qo'llanilishi, muammo va yechimlar kabi ketma-ketlikka moslashtiring.
+
+Har doim: aniq faktlar, raqamlar va real misollar bilan yozing; umumiy va bo'sh gaplardan saqlaning; matn mantiqiy va bir-biriga bog'liq bo'lsin; sodda, tushunarli va ta'lim standartlariga mos o'zbek tilida yozing."""
+
+
 def _generate_with_groq(topic: str, wiki_context: str) -> Tuple[List[str], List[str]]:
     user_prompt = f"""Mavzu: {topic}
 Qisqacha ma'lumot (tayanch sifatida, agar bo'sh bo'lsa o'z bilimingizdan foydalaning): {wiki_context}
@@ -536,7 +577,7 @@ Qisqacha ma'lumot (tayanch sifatida, agar bo'sh bo'lsa o'z bilimingizdan foydala
 Vazifa: Ushbu mavzu bo'yicha to'liq va professional taqdimot (prezentatsiya) tuzing.
 
 Qat'iy talablar:
-1) Aniq {MIN_SECTIONS} banddan iborat reja tuzing (raqamlangan 1-{MIN_SECTIONS}), oxirgi band albatta "Xulosa" bo'lsin.
+1) Aniq {MIN_SECTIONS} banddan iborat reja tuzing (raqamlangan 1-{MIN_SECTIONS}), oxirgi band albatta "Xulosa" bo'lsin. Bandlar mavzu turiga mos, mantiqiy ketma-ketlikda bo'lsin (tizim ko'rsatmasidagi struktura tamoyillariga qarang).
 2) Har bir band uchun 250-400 so'zdan iborat, aniq va tushunarli matn yozing. Matnlar bir-biriga mos, mantiqiy ketma-ketlikda bo'lsin.
 3) Matnlarda aniq faktlar, misollar va tushunchalar bo'lsin. Umumiy va bo'sh gaplardan saqlaning.
 4) O'zbek tilida, sodda va ta'lim standartlariga mos uslubda yozing.
@@ -557,7 +598,7 @@ Matnlar:
         resp = groq_client.chat.completions.create(
             model=GROQ_MODEL,
             messages=[
-                {"role": "system", "content": "Siz professional ta'lim taqdimotlari yaratuvchi mutaxassissiz."},
+                {"role": "system", "content": GROQ_SYSTEM_PROMPT},
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.5,
