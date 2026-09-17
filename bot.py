@@ -13,6 +13,7 @@ from aiogram.filters import CommandStart
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.types import FSInputFile
+from openai import OpenAI
 from PIL import Image
 from pptx import Presentation
 from pptx.dml.color import RGBColor
@@ -283,8 +284,8 @@ def create_presentation_file(topic: str, plan: List[str], content_chunks: List[s
     text_top = Inches(1.55)
     text_height = Inches(5.15)
 
-    # ensure at least 1 image per content slide
-    needed = max(7, len(content_chunks))
+    # guarantee >=10 total slides: 1 title + needed content + 1 thank-you (+1 if a large image is inserted)
+    needed = max(8, len(content_chunks))
     chunks = content_chunks.copy()
     # if too few chunks, split long ones
     if len(chunks) < needed:
@@ -480,7 +481,103 @@ def create_presentation_file(topic: str, plan: List[str], content_chunks: List[s
     return filename
 
 
-# ---------------- WIKIPEDIA CONTENT GENERATION (AI'siz) ----------------
+# ---------------- GROQ AI CONTENT GENERATION ----------------
+GROQ_API_KEY = "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"
+GROQ_MODEL = "openai/gpt-oss-120b"
+MIN_SECTIONS = 9  # Kirish + 7 mavzu bandi + Xulosa => kamida 10 slaydga yetadi
+
+groq_client = OpenAI(api_key=GROQ_API_KEY, base_url="https://api.groq.com/openai/v1")
+
+
+def _parse_plan_response(raw: str) -> Tuple[List[str], List[str]]:
+    plan: List[str] = []
+    contents: List[str] = []
+    if "Reja:" not in raw or "Matnlar:" not in raw:
+        return plan, contents
+    try:
+        plan_part = raw.split("Matnlar:")[0].split("Reja:", 1)[1].strip()
+        text_part = raw.split("Matnlar:", 1)[1].strip()
+        for line in plan_part.splitlines():
+            line = line.strip()
+            if line and (line[0].isdigit() or line.startswith("-")):
+                if "." in line:
+                    plan.append(line.split(".", 1)[1].strip())
+                else:
+                    plan.append(line.lstrip("- ").strip())
+        cur_idx = 0
+        current_texts = {}
+        for line in text_part.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if line[0].isdigit() and "." in line[:3]:
+                idx = int(line.split(".", 1)[0].strip())
+                rest = line.split(".", 1)[1].strip()
+                current_texts[idx] = rest
+                cur_idx = idx
+            else:
+                if cur_idx == 0:
+                    current_texts.setdefault(1, "")
+                    current_texts[1] += " " + line
+                else:
+                    current_texts[cur_idx] = current_texts.get(cur_idx, "") + " " + line
+        max_idx = max(current_texts.keys()) if current_texts else 0
+        for i in range(1, max_idx + 1):
+            contents.append(current_texts.get(i, "").strip())
+    except Exception:
+        return [], []
+    return plan, contents
+
+
+def _generate_with_groq(topic: str, wiki_context: str) -> Tuple[List[str], List[str]]:
+    user_prompt = f"""Mavzu: {topic}
+Qisqacha ma'lumot (tayanch sifatida, agar bo'sh bo'lsa o'z bilimingizdan foydalaning): {wiki_context}
+
+Vazifa: Ushbu mavzu bo'yicha to'liq va professional taqdimot (prezentatsiya) tuzing.
+
+Qat'iy talablar:
+1) Aniq {MIN_SECTIONS} banddan iborat reja tuzing (raqamlangan 1-{MIN_SECTIONS}), oxirgi band albatta "Xulosa" bo'lsin.
+2) Har bir band uchun 250-400 so'zdan iborat, aniq va tushunarli matn yozing. Matnlar bir-biriga mos, mantiqiy ketma-ketlikda bo'lsin.
+3) Matnlarda aniq faktlar, misollar va tushunchalar bo'lsin. Umumiy va bo'sh gaplardan saqlaning.
+4) O'zbek tilida, sodda va ta'lim standartlariga mos uslubda yozing.
+
+Natijani FAQAT quyidagi formatda qaytaring, boshqa hech qanday izoh yozmang:
+Reja:
+1. ...
+2. ...
+...
+{MIN_SECTIONS}. ...
+Matnlar:
+1. ...
+2. ...
+...
+{MIN_SECTIONS}. ...
+"""
+    try:
+        resp = groq_client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[
+                {"role": "system", "content": "Siz professional ta'lim taqdimotlari yaratuvchi mutaxassissiz."},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.5,
+            max_tokens=8000,
+        )
+        raw = resp.choices[0].message.content.strip()
+        raw = re.sub(r"[*#]", "", raw)
+    except Exception:
+        logging.exception("Groq AI xatosi:")
+        return [], []
+
+    plan, contents = _parse_plan_response(raw)
+    if len(plan) < 4 or len(contents) < 4:
+        return [], []
+    while len(contents) < len(plan):
+        contents.append("Ma'lumot yetishmadi.")
+    return plan, contents
+
+
+# ---------------- WIKIPEDIA CONTENT GENERATION (fallback, AI'siz) ----------------
 SKIP_WIKI_SECTIONS = {
     "manbalar", "adabiyotlar", "havolalar", "izohlar", "tashqi havolalar",
     "shuningdek qarang", "yana qarang", "eslatmalar", "manba",
@@ -516,8 +613,8 @@ def _fetch_wikipedia_content(topic: str) -> str:
         return ""
 
 
-def generate_plan_and_contents(topic: str) -> Tuple[List[str], List[str]]:
-    """Reja va matnlarni Wikipedia maqolasidan (AI ishtirokisiz) tuzadi."""
+def _generate_from_wikipedia_only(topic: str) -> Tuple[List[str], List[str]]:
+    """Groq ishlamay qolsa ishlatiladigan zaxira: reja va matnlarni Wikipedia maqolasidan (AI ishtirokisiz) tuzadi."""
     content = _fetch_wikipedia_content(topic)
 
     plan: List[str] = []
@@ -539,7 +636,7 @@ def generate_plan_and_contents(topic: str) -> Tuple[List[str], List[str]]:
         if intro:
             plan.append("Kirish")
             contents.append(intro)
-        for heading, body in sections[:4]:
+        for heading, body in sections[:8]:
             plan.append(heading)
             contents.append(body)
 
@@ -558,6 +655,20 @@ def generate_plan_and_contents(topic: str) -> Tuple[List[str], List[str]]:
         contents.append("Ma'lumot yetishmadi — iltimos mavzuni kengroq yozing.")
 
     return plan, contents
+
+
+def generate_plan_and_contents(topic: str) -> Tuple[List[str], List[str]]:
+    """Reja va matnlarni avvalo Groq AI orqali, muvaffaqiyatsiz bo'lsa Wikipedia'dan tuzadi."""
+    try:
+        wiki_context = wikipedia.summary(topic, sentences=8)
+    except Exception:
+        wiki_context = ""
+
+    plan, contents = _generate_with_groq(topic, wiki_context)
+    if plan and contents:
+        return plan, contents
+
+    return _generate_from_wikipedia_only(topic)
 
 
 # ---------------- BOT HANDLERS ----------------
@@ -595,6 +706,19 @@ async def handle_photo(message: types.Message, state: FSMContext):
     await state.update_data(last_img_path=user_img_path)
     await message.reply("🖼 Rasm yuklandi! Bu rasmni qayerda ishlatmoqchisiz?\n- 'asosiy' - Katta sahifada\n- 'matn' - Matn sahifalarida")
     await state.set_state(Form.waiting_for_type)
+
+
+@dp.message(Form.waiting_for_image)
+async def handle_skip_image(message: types.Message, state: FSMContext):
+    text = (message.text or "").lower().strip()
+    if text == "skip":
+        data = await state.get_data()
+        topic = data.get("topic")
+        await state.clear()
+        await message.reply("Prezentatsiya yaratilmoqda...")
+        await create_presentation(message, topic, [], [])
+    else:
+        await message.reply("Iltimos, rasm yuboring yoki rasmsiz davom etish uchun 'skip' deb yozing.")
 
 
 @dp.message(Form.waiting_for_type)
@@ -655,7 +779,7 @@ async def create_presentation(message: types.Message, topic: str, slide_images: 
 
     content_chunks = []
     for text in contents:
-        content_chunks.extend(split_text_to_chunks(text, max_chars=800))
+        content_chunks.extend(split_text_to_chunks(text, max_chars=1400))
 
     await message.answer("🎨 Dizayn va rasm tanlanmoqda, fayl yaratilmoqda...")
     pptx_path = await loop.run_in_executor(None, create_presentation_file, topic, plan, content_chunks, message.from_user.id, slide_images, large_images)
