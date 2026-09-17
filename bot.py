@@ -12,9 +12,13 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.types import FSInputFile
 from openai import OpenAI
+from PIL import Image
 from pptx import Presentation
 from pptx.dml.color import RGBColor
-from pptx.enum.text import PP_ALIGN
+from pptx.enum.shapes import MSO_SHAPE
+from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
+from pptx.oxml.ns import qn
+from pptx.oxml.xmlchemy import OxmlElement
 from pptx.util import Inches, Pt
 
 BOT_TOKEN = ""
@@ -32,13 +36,143 @@ class Form(StatesGroup):
     waiting_for_type = State()
     waiting_for_more = State()
 
-BACKGROUND_COLORS = [
-    RGBColor(33, 150, 243),
-    RGBColor(76, 175, 80),
-    RGBColor(255, 152, 0),
-    RGBColor(156, 39, 176),
-    RGBColor(0, 188, 212),
+# ---------------- DESIGN THEMES ----------------
+FONT_HEADING = "Century Gothic"
+FONT_BODY = "Calibri"
+
+THEMES = [
+    {
+        "name": "Ocean",
+        "primary": RGBColor(0x0D, 0x47, 0xA1),
+        "primary_dark": RGBColor(0x07, 0x2A, 0x5E),
+        "accent": RGBColor(0x29, 0xB6, 0xF6),
+        "bg": RGBColor(0xF5, 0xF9, 0xFF),
+        "text": RGBColor(0x16, 0x22, 0x33),
+        "muted": RGBColor(0x7A, 0x8B, 0xA3),
+    },
+    {
+        "name": "Emerald",
+        "primary": RGBColor(0x1B, 0x5E, 0x20),
+        "primary_dark": RGBColor(0x0E, 0x35, 0x12),
+        "accent": RGBColor(0x66, 0xBB, 0x6A),
+        "bg": RGBColor(0xF3, 0xFA, 0xF3),
+        "text": RGBColor(0x17, 0x26, 0x18),
+        "muted": RGBColor(0x7C, 0x94, 0x7E),
+    },
+    {
+        "name": "Sunset",
+        "primary": RGBColor(0xBF, 0x36, 0x0C),
+        "primary_dark": RGBColor(0x6E, 0x1E, 0x08),
+        "accent": RGBColor(0xFF, 0xA7, 0x26),
+        "bg": RGBColor(0xFF, 0xF8, 0xF1),
+        "text": RGBColor(0x2E, 0x1C, 0x12),
+        "muted": RGBColor(0xA3, 0x87, 0x74),
+    },
+    {
+        "name": "Royal",
+        "primary": RGBColor(0x4A, 0x14, 0x8C),
+        "primary_dark": RGBColor(0x28, 0x0A, 0x4D),
+        "accent": RGBColor(0xBA, 0x68, 0xC8),
+        "bg": RGBColor(0xF9, 0xF5, 0xFC),
+        "text": RGBColor(0x22, 0x16, 0x2C),
+        "muted": RGBColor(0x93, 0x82, 0xA0),
+    },
+    {
+        "name": "Slate",
+        "primary": RGBColor(0x1C, 0x2B, 0x36),
+        "primary_dark": RGBColor(0x0A, 0x14, 0x1A),
+        "accent": RGBColor(0x26, 0xC6, 0xDA),
+        "bg": RGBColor(0xF4, 0xF7, 0xF8),
+        "text": RGBColor(0x14, 0x1D, 0x22),
+        "muted": RGBColor(0x7C, 0x92, 0x9C),
+    },
 ]
+
+
+def lighten(color: RGBColor, factor: float) -> RGBColor:
+    r, g, b = color[0], color[1], color[2]
+    return RGBColor(
+        int(r + (255 - r) * factor),
+        int(g + (255 - g) * factor),
+        int(b + (255 - b) * factor),
+    )
+
+
+def set_shape_transparency(shape, alpha_pct: int) -> None:
+    """alpha_pct: 0 (invisible) .. 100 (fully opaque)."""
+    solid_fill = shape.fill.fore_color._xFill
+    srgb_clr = solid_fill.find(qn("a:srgbClr"))
+    alpha = OxmlElement("a:alpha")
+    alpha.set("val", str(int(alpha_pct * 1000)))
+    srgb_clr.append(alpha)
+
+
+def no_shadow(shape) -> None:
+    try:
+        shape.shadow.inherit = False
+    except Exception:
+        pass
+
+
+def add_gradient_bg(slide, color1: RGBColor, color2: RGBColor, angle: float = 45) -> None:
+    fill = slide.background.fill
+    fill.gradient()
+    stops = fill.gradient_stops
+    stops[0].color.rgb = color1
+    stops[1].color.rgb = color2
+    fill.gradient_angle = angle
+
+
+def add_decor_circle(slide, x, y, d, color: RGBColor, alpha_pct: int = 15):
+    shape = slide.shapes.add_shape(MSO_SHAPE.OVAL, x, y, d, d)
+    shape.fill.solid()
+    shape.fill.fore_color.rgb = color
+    shape.line.fill.background()
+    no_shadow(shape)
+    set_shape_transparency(shape, alpha_pct)
+    return shape
+
+
+def add_rect(slide, x, y, w, h, color: RGBColor, shape_type=MSO_SHAPE.RECTANGLE):
+    shape = slide.shapes.add_shape(shape_type, x, y, w, h)
+    shape.fill.solid()
+    shape.fill.fore_color.rgb = color
+    shape.line.fill.background()
+    no_shadow(shape)
+    return shape
+
+
+def add_footer(slide, theme: dict, topic: str, page_no: int, prs_width) -> None:
+    add_rect(slide, Inches(0.6), Inches(6.95), prs_width - Inches(1.2), Pt(1.2), lighten(theme["primary"], 0.6))
+    box = slide.shapes.add_textbox(Inches(0.6), Inches(7.02), prs_width - Inches(1.6), Inches(0.35))
+    tf = box.text_frame
+    tf.word_wrap = False
+    p = tf.paragraphs[0]
+    p.text = topic
+    p.font.size = Pt(11)
+    p.font.name = FONT_BODY
+    p.font.color.rgb = theme["muted"]
+    p.alignment = PP_ALIGN.LEFT
+
+    num_box = slide.shapes.add_textbox(prs_width - Inches(1.2), Inches(7.02), Inches(0.6), Inches(0.35))
+    ntf = num_box.text_frame
+    np_ = ntf.paragraphs[0]
+    np_.text = str(page_no)
+    np_.font.size = Pt(11)
+    np_.font.name = FONT_BODY
+    np_.font.color.rgb = theme["muted"]
+    np_.alignment = PP_ALIGN.RIGHT
+
+
+def fit_dimensions(img_path: str, max_w: int, max_h: int) -> Tuple[int, int]:
+    """Return (width, height) in EMU that fit inside max_w x max_h, preserving aspect ratio."""
+    try:
+        with Image.open(img_path) as im:
+            iw, ih = im.size
+        ratio = min(max_w / iw, max_h / ih)
+        return int(iw * ratio), int(ih * ratio)
+    except Exception:
+        return max_w, max_h
 
 # ---------------- PRESENTATION CREATOR ----------------
 def split_text_to_chunks(text: str, max_chars: int = 1200) -> List[str]:
@@ -69,48 +203,85 @@ def create_presentation_file(topic: str, plan: List[str], content_chunks: List[s
     prs = Presentation()
     prs.slide_height = Inches(7.5)
     prs.slide_width = Inches(13.3333)
+    sw, sh = prs.slide_width, prs.slide_height
 
-    # Title + Plan slide
+    theme = random.choice(THEMES)
+
+    # ---------------- Title + Plan slide ----------------
     slide = prs.slides.add_slide(prs.slide_layouts[6])
-    slide.background.fill.solid()
-    slide.background.fill.fore_color.rgb = RGBColor(25, 118, 210)
+    add_gradient_bg(slide, theme["primary_dark"], theme["primary"], angle=45)
 
-    title_box = slide.shapes.add_textbox(Inches(0.6), Inches(0.5), prs.slide_width - Inches(1.2), Inches(1.2))
+    add_decor_circle(slide, sw - Inches(2.6), Inches(-2.0), Inches(5.2), RGBColor(255, 255, 255), alpha_pct=8)
+    add_decor_circle(slide, Inches(-1.6), sh - Inches(2.2), Inches(3.6), theme["accent"], alpha_pct=18)
+
+    title_box = slide.shapes.add_textbox(Inches(0.9), Inches(0.7), sw - Inches(1.8), Inches(1.5))
     title_tf = title_box.text_frame
+    title_tf.word_wrap = True
     title_p = title_tf.paragraphs[0]
     title_p.text = topic
-    title_p.font.size = Pt(44)
+    title_p.font.size = Pt(42)
     title_p.font.bold = True
+    title_p.font.name = FONT_HEADING
     title_p.font.color.rgb = RGBColor(255, 255, 255)
-    title_p.alignment = PP_ALIGN.CENTER
+    title_p.alignment = PP_ALIGN.LEFT
 
-    sub_box = slide.shapes.add_textbox(Inches(1.0), Inches(1.9), prs.slide_width - Inches(2.0), Inches(0.6))
-    sub_tf = sub_box.text_frame
-    sp = sub_tf.paragraphs[0]
-    sp.text = "Reja"
-    sp.font.size = Pt(28)
-    sp.font.bold = True
-    sp.font.color.rgb = RGBColor(255, 255, 255)
-    sp.alignment = PP_ALIGN.LEFT
+    add_rect(slide, Inches(0.95), Inches(1.95), Inches(1.4), Pt(4), theme["accent"])
 
-    bullets_box = slide.shapes.add_textbox(Inches(1.0), Inches(2.6), prs.slide_width - Inches(2.0), Inches(4.0))
-    bullets_tf = bullets_box.text_frame
-    bullets_tf.word_wrap = True
-    for item in plan:
-        p = bullets_tf.add_paragraph()
-        p.text = f"• {item}"
-        p.font.size = Pt(18)
-        p.font.color.rgb = RGBColor(255, 255, 255)
-        p.alignment = PP_ALIGN.LEFT
+    badge = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, Inches(0.9), Inches(2.3), Inches(1.5), Inches(0.5))
+    badge.fill.solid()
+    badge.fill.fore_color.rgb = theme["accent"]
+    badge.line.fill.background()
+    no_shadow(badge)
+    btf = badge.text_frame
+    btf.vertical_anchor = MSO_ANCHOR.MIDDLE
+    bp = btf.paragraphs[0]
+    bp.text = "REJA"
+    bp.font.size = Pt(16)
+    bp.font.bold = True
+    bp.font.name = FONT_BODY
+    bp.font.color.rgb = RGBColor(255, 255, 255)
+    bp.alignment = PP_ALIGN.CENTER
 
-    # Content slides: left = text, right = image
-    left_margin = Inches(0.6)
-    right_margin = Inches(0.6)
-    gap = Inches(0.3)
-    image_width = Inches(4.0)
-    image_height = Inches(4.0)
-    text_top = Inches(1.2)
-    text_height = Inches(5.0)
+    item_y = Inches(3.15)
+    item_h = Inches(0.68)
+    badge_d = Inches(0.42)
+    for i, item in enumerate(plan, start=1):
+        num = slide.shapes.add_shape(MSO_SHAPE.OVAL, Inches(0.9), item_y, badge_d, badge_d)
+        num.fill.solid()
+        num.fill.fore_color.rgb = theme["accent"]
+        num.line.color.rgb = RGBColor(255, 255, 255)
+        num.line.width = Pt(1.25)
+        no_shadow(num)
+        ntf = num.text_frame
+        ntf.vertical_anchor = MSO_ANCHOR.MIDDLE
+        np_ = ntf.paragraphs[0]
+        np_.text = str(i)
+        np_.font.size = Pt(16)
+        np_.font.bold = True
+        np_.font.name = FONT_BODY
+        np_.font.color.rgb = RGBColor(255, 255, 255)
+        np_.alignment = PP_ALIGN.CENTER
+
+        text_box = slide.shapes.add_textbox(Inches(1.55), item_y - Inches(0.06), sw - Inches(2.6), item_h)
+        ttf = text_box.text_frame
+        ttf.word_wrap = True
+        ttf.vertical_anchor = MSO_ANCHOR.MIDDLE
+        tp = ttf.paragraphs[0]
+        tp.text = item
+        tp.font.size = Pt(19)
+        tp.font.name = FONT_BODY
+        tp.font.color.rgb = RGBColor(255, 255, 255)
+        tp.alignment = PP_ALIGN.LEFT
+        item_y += item_h
+
+    # ---------------- Content slide layout constants ----------------
+    left_margin = Inches(0.7)
+    right_margin = Inches(0.7)
+    gap = Inches(0.4)
+    image_box_w = Inches(4.3)
+    image_box_h = Inches(4.6)
+    text_top = Inches(1.55)
+    text_height = Inches(5.15)
 
     # ensure at least 1 image per content slide
     needed = max(7, len(content_chunks))
@@ -148,40 +319,85 @@ def create_presentation_file(topic: str, plan: List[str], content_chunks: List[s
     slide_num = 1
     for idx, chunk in enumerate(final_chunks):
         if large_images and idx == len(final_chunks) // 2:
-            # Add large image slide in the middle
+            # ---------------- Large image slide ----------------
             slide = prs.slides.add_slide(prs.slide_layouts[6])
             slide.background.fill.solid()
-            slide.background.fill.fore_color.rgb = RGBColor(255, 255, 255)
-            # Add large image
+            slide.background.fill.fore_color.rgb = theme["bg"]
+            add_rect(slide, 0, 0, sw, Inches(0.14), theme["accent"])
+
             img_path = large_images[0]  # Use the first large image
             try:
+                box_x, box_y, box_w, box_h = Inches(0.9), Inches(0.7), sw - Inches(1.8), sh - Inches(1.9)
+                pic_w, pic_h = fit_dimensions(img_path, box_w, box_h)
+                pic_x = box_x + (box_w - pic_w) // 2
+                pic_y = box_y + (box_h - pic_h) // 2
+                frame_pad = Inches(0.08)
+                add_rect(slide, pic_x - frame_pad, pic_y - frame_pad, pic_w + frame_pad * 2, pic_h + frame_pad * 2, theme["primary"])
                 with open(img_path, "rb") as f:
                     img_data = f.read()
                 img_stream = BytesIO(img_data)
                 img_stream.seek(0)
-                slide.shapes.add_picture(img_stream, Inches(0.5), Inches(0.5), width=prs.slide_width - Inches(1), height=prs.slide_height - Inches(1))
+                slide.shapes.add_picture(img_stream, pic_x, pic_y, width=pic_w, height=pic_h)
+
+                caption = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, sw / 2 - Inches(2.5), sh - Inches(1.05), Inches(5.0), Inches(0.55))
+                caption.fill.solid()
+                caption.fill.fore_color.rgb = theme["primary"]
+                caption.line.fill.background()
+                no_shadow(caption)
+                ctf = caption.text_frame
+                ctf.vertical_anchor = MSO_ANCHOR.MIDDLE
+                cp = ctf.paragraphs[0]
+                cp.text = topic
+                cp.font.size = Pt(16)
+                cp.font.bold = True
+                cp.font.name = FONT_BODY
+                cp.font.color.rgb = RGBColor(255, 255, 255)
+                cp.alignment = PP_ALIGN.CENTER
             except Exception as e:
                 logging.exception(f"Failed to add large image: {e}")
 
+        # ---------------- Regular content slide ----------------
         slide = prs.slides.add_slide(prs.slide_layouts[6])
         slide.background.fill.solid()
-        slide.background.fill.fore_color.rgb = RGBColor(255, 255, 255)
+        slide.background.fill.fore_color.rgb = theme["bg"]
+        add_rect(slide, 0, 0, sw, Inches(0.14), theme["accent"])
 
-        # Heading
-        title_box = slide.shapes.add_textbox(left_margin, Inches(0.5), prs.slide_width - left_margin - right_margin, Inches(1.0))
+        # Slide-number badge + heading
+        badge_d2 = Inches(0.55)
+        num_badge = slide.shapes.add_shape(MSO_SHAPE.OVAL, left_margin, Inches(0.55), badge_d2, badge_d2)
+        num_badge.fill.solid()
+        num_badge.fill.fore_color.rgb = theme["primary"]
+        num_badge.line.fill.background()
+        no_shadow(num_badge)
+        nbtf = num_badge.text_frame
+        nbtf.vertical_anchor = MSO_ANCHOR.MIDDLE
+        nbp = nbtf.paragraphs[0]
+        nbp.text = str(slide_num)
+        nbp.font.size = Pt(20)
+        nbp.font.bold = True
+        nbp.font.name = FONT_BODY
+        nbp.font.color.rgb = RGBColor(255, 255, 255)
+        nbp.alignment = PP_ALIGN.CENTER
+
+        title_box = slide.shapes.add_textbox(left_margin + badge_d2 + Inches(0.25), Inches(0.5), sw - left_margin - right_margin - badge_d2 - Inches(0.25), Inches(0.75))
         tf = title_box.text_frame
+        tf.word_wrap = True
+        tf.vertical_anchor = MSO_ANCHOR.MIDDLE
         p = tf.paragraphs[0]
-        heading = f"{slide_num}. {plan[idx] if idx < len(plan) else topic}"
+        heading = plan[idx] if idx < len(plan) else topic
         p.text = heading
-        p.font.size = Pt(24)
+        p.font.size = Pt(26)
         p.font.bold = True
-        p.font.color.rgb = RGBColor(0, 0, 0)
+        p.font.name = FONT_HEADING
+        p.font.color.rgb = theme["primary"]
         p.alignment = PP_ALIGN.LEFT
+
+        add_rect(slide, left_margin, Inches(1.3), Inches(0.9), Pt(3), theme["accent"])
 
         # Text
         if slide_images and idx < len(slide_images):
-            # With image: left column
-            content_box_width = prs.slide_width - left_margin - right_margin - image_width - gap
+            # With image: left column, divider, image on right (aspect-ratio preserved)
+            content_box_width = sw - left_margin - right_margin - image_box_w - gap
             content_box = slide.shapes.add_textbox(left_margin, text_top, content_box_width, text_height)
             content_tf = content_box.text_frame
             content_tf.word_wrap = True
@@ -189,47 +405,75 @@ def create_presentation_file(topic: str, plan: List[str], content_chunks: List[s
                 para = content_tf.add_paragraph()
                 para.text = part
                 para.font.size = Pt(16)
-                para.font.name = "Segoe UI"
-                para.font.color.rgb = RGBColor(0, 0, 0)
+                para.font.name = FONT_BODY
+                para.font.color.rgb = theme["text"]
                 para.alignment = PP_ALIGN.JUSTIFY
+                para.line_spacing = 1.15
+                para.space_after = Pt(10)
 
-            # Image (right column)
+            add_rect(slide, left_margin + content_box_width + gap / 2, text_top, Pt(1.2), text_height, lighten(theme["primary"], 0.55))
+
             img_path = slide_images[idx]
             try:
+                img_area_x = left_margin + content_box_width + gap
+                pic_w, pic_h = fit_dimensions(img_path, image_box_w, image_box_h)
+                pic_x = img_area_x + (image_box_w - pic_w) // 2
+                pic_y = text_top + (image_box_h - pic_h) // 2
+                frame_pad = Inches(0.06)
+                add_rect(slide, pic_x - frame_pad, pic_y - frame_pad, pic_w + frame_pad * 2, pic_h + frame_pad * 2, lighten(theme["primary"], 0.85))
                 with open(img_path, "rb") as f:
                     img_bytes = f.read()
                 img_stream = BytesIO(img_bytes)
                 img_stream.seek(0)
-                slide.shapes.add_picture(img_stream, left_margin + content_box_width + gap, text_top, width=image_width, height=image_height)
+                pic = slide.shapes.add_picture(img_stream, pic_x, pic_y, width=pic_w, height=pic_h)
+                pic.line.color.rgb = theme["accent"]
+                pic.line.width = Pt(1.5)
             except Exception as e:
                 logging.exception(f"Failed to add picture on slide {idx+1}: {e}")
         else:
             # No image: full width, centered
-            content_box = slide.shapes.add_textbox(left_margin, text_top, prs.slide_width - left_margin - right_margin, text_height)
+            content_box = slide.shapes.add_textbox(left_margin, text_top, sw - left_margin - right_margin, text_height)
             content_tf = content_box.text_frame
             content_tf.word_wrap = True
             for part in split_text_to_chunks(chunk, max_chars=800):  # More chars since full width
                 para = content_tf.add_paragraph()
                 para.text = part
                 para.font.size = Pt(18)  # Slightly larger
-                para.font.name = "Segoe UI"
-                para.font.color.rgb = RGBColor(0, 0, 0)
+                para.font.name = FONT_BODY
+                para.font.color.rgb = theme["text"]
                 para.alignment = PP_ALIGN.JUSTIFY
+                para.line_spacing = 1.2
+                para.space_after = Pt(12)
 
+        add_footer(slide, theme, topic, slide_num, sw)
         slide_num += 1
 
-    # Final "Thank you" slide
+    # ---------------- Final "Thank you" slide ----------------
     slide = prs.slides.add_slide(prs.slide_layouts[6])
-    slide.background.fill.solid()
-    slide.background.fill.fore_color.rgb = RGBColor(255, 255, 255)
-    box = slide.shapes.add_textbox(Inches(1), Inches(2.5), prs.slide_width - Inches(2), Inches(3))
+    add_gradient_bg(slide, theme["primary"], theme["primary_dark"], angle=225)
+    add_decor_circle(slide, sw - Inches(3.2), sh - Inches(3.2), Inches(4.8), RGBColor(255, 255, 255), alpha_pct=8)
+    add_decor_circle(slide, Inches(-1.2), Inches(-1.2), Inches(3.2), theme["accent"], alpha_pct=18)
+
+    box = slide.shapes.add_textbox(Inches(1), Inches(2.7), sw - Inches(2), Inches(1.3))
     tf = box.text_frame
     p = tf.paragraphs[0]
-    p.text = "ETIBORINGIZ UCHUN RAHMAT!"
-    p.font.size = Pt(48)
+    p.text = "RAHMAT!"
+    p.font.size = Pt(54)
     p.font.bold = True
-    p.font.color.rgb = RGBColor(0, 0, 0)
+    p.font.name = FONT_HEADING
+    p.font.color.rgb = RGBColor(255, 255, 255)
     p.alignment = PP_ALIGN.CENTER
+
+    add_rect(slide, sw / 2 - Inches(0.75), Inches(3.75), Inches(1.5), Pt(4), theme["accent"])
+
+    sub_box = slide.shapes.add_textbox(Inches(1), Inches(4.0), sw - Inches(2), Inches(0.7))
+    stf = sub_box.text_frame
+    sp = stf.paragraphs[0]
+    sp.text = topic
+    sp.font.size = Pt(20)
+    sp.font.name = FONT_BODY
+    sp.font.color.rgb = lighten(theme["accent"], 0.3)
+    sp.alignment = PP_ALIGN.CENTER
 
     filename = f"{topic.replace(' ', '_')}.pptx"
     prs.save(filename)
