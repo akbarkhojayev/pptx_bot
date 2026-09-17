@@ -2,16 +2,17 @@ import asyncio
 import logging
 import os
 import random
+import re
 import textwrap
 from io import BytesIO
 from typing import List, Tuple, Optional
 import wikipedia
+import wikipedia.wikipedia as _wikipedia_internal
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import CommandStart
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.context import FSMContext
 from aiogram.types import FSInputFile
-from openai import OpenAI
 from PIL import Image
 from pptx import Presentation
 from pptx.dml.color import RGBColor
@@ -21,14 +22,14 @@ from pptx.oxml.ns import qn
 from pptx.oxml.xmlchemy import OxmlElement
 from pptx.util import Inches, Pt
 
-BOT_TOKEN = ""
-OPENAI_API_KEY = ""
+BOT_TOKEN = "8710621594:AAGNoMFolos2L-Df2KPVAQozFsMohqMub-c"
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
-client = OpenAI(api_key=OPENAI_API_KEY)
 logging.basicConfig(level=logging.INFO)
 wikipedia.set_lang("uz")
+# Wikimedia rate-limits the library's shared default User-Agent; a distinct one avoids collateral 429s.
+_wikipedia_internal.USER_AGENT = "PptxPresentationBot/1.0 (Telegram content-generation bot)"
 
 class Form(StatesGroup):
     waiting_for_topic = State()
@@ -179,7 +180,6 @@ def split_text_to_chunks(text: str, max_chars: int = 1200) -> List[str]:
     """
     Split a given text into chunks of at most max_chars characters.
     """
-    import re
     sentences = re.split(r"(?<=[.!?])\s+", text.strip())
     chunks, current = [], ""
     for s in sentences:
@@ -480,95 +480,80 @@ def create_presentation_file(topic: str, plan: List[str], content_chunks: List[s
     return filename
 
 
-# ---------------- OPENAI TEXT GENERATION ----------------
-def generate_plan_and_contents(topic: str) -> Tuple[List[str], List[str]]:
+# ---------------- WIKIPEDIA CONTENT GENERATION (AI'siz) ----------------
+SKIP_WIKI_SECTIONS = {
+    "manbalar", "adabiyotlar", "havolalar", "izohlar", "tashqi havolalar",
+    "shuningdek qarang", "yana qarang", "eslatmalar", "manba",
+    "qo'shimcha adabiyotlar", "bibliografiya", "izoh",
+}
+
+
+def _clean_wiki_text(text: str) -> str:
+    text = re.sub(r"\[\d+\]", "", text)  # citation markers like [1]
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r"\n{2,}", "\n", text)
+    return text.strip()
+
+
+def _first_sentences(text: str, n: int) -> str:
+    sentences = re.split(r"(?<=[.!?])\s+", text.strip())
+    return " ".join(sentences[:n]).strip()
+
+
+def _fetch_wikipedia_content(topic: str) -> str:
     try:
-        wiki = wikipedia.summary(topic, sentences=6)
-    except Exception:
-        wiki = ""
-
-    user_prompt = f"""
-Mavzu: {topic}
-Wikipedia: {wiki}
-
-Vazifa:
-1) 4-5 banddan iborat reja tuzing (raqamlangan), 5 - bu xulosa bolsin.
-2) Har band uchun 300-500 so'zli tushunarli matn yozing.
-3) Matn misollar bilan bo'lsin va oxirida qisqacha xulosa yozing.
-
-Natija quyidagi formatda bo'lsin:
-Reja:
-1. ...
-2. ...
-Matnlar:
-1. ...
-2. ...
-"""
-
-    try:
-        resp = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "Siz professional taqdimot yaratuvchisiz."},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=0.6,
-            max_tokens=3000,
-        )
-        raw = resp.choices[0].message.content.strip()
-        # Clean unnecessary characters
-        import re
-        raw = re.sub(r'[*#]', '', raw)
-    except Exception as e:
-        logging.exception("OpenAI xatosi:")
-        # fallback simple content
-        plan = ["Kirish", "Asosiy tushunchalar", "Amaliy misollar", "Muammolar va echimlar", "Xulosa"]
-        contents = ["Kirish: mavzu haqida umumiy ma'lumot."] * 5
-        return plan, contents
-
-    plan = []
-    contents = []
-    if "Reja:" in raw and "Matnlar:" in raw:
+        page = wikipedia.page(topic, auto_suggest=True)
+        return page.content
+    except wikipedia.DisambiguationError as e:
         try:
-            plan_part = raw.split("Matnlar:")[0].replace("Reja:", "").strip()
-            text_part = raw.split("Matnlar:")[1].strip()
-            for line in plan_part.splitlines():
-                line = line.strip()
-                if line and (line[0].isdigit() or line.startswith("-")):
-                    if "." in line:
-                        plan.append(line.split(".", 1)[1].strip())
-                    else:
-                        plan.append(line.lstrip("- ").strip())
-            cur_idx = 0
-            current_texts = {}
-            for line in text_part.splitlines():
-                line = line.strip()
-                if not line:
-                    continue
-                if line[0].isdigit() and "." in line[:3]:
-                    idx = int(line.split(".", 1)[0].strip())
-                    rest = line.split(".", 1)[1].strip()
-                    current_texts[idx] = rest
-                    cur_idx = idx
-                else:
-                    if cur_idx == 0:
-                        current_texts.setdefault(1, "")
-                        current_texts[1] += " " + line
-                    else:
-                        current_texts[cur_idx] = current_texts.get(cur_idx, "") + " " + line
-            max_idx = max(current_texts.keys()) if current_texts else 0
-            for i in range(1, max_idx + 1):
-                contents.append(current_texts.get(i, "").strip())
+            page = wikipedia.page(e.options[0], auto_suggest=False)
+            return page.content
         except Exception:
-            plan = ["Kirish", "Asosiy tushunchalar", "Amaliy misollar", "Muammolar va echimlar", "Xulosa"]
-            contents = ["Kirish: mavzu haqida umumiy ma'lumot."] * 5
-    else:
-        # fallback simple split
-        lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
-        plan = lines[:5]
-        contents = [" ".join(lines[5:]) or "Ma'lumot yetishmadi."] * len(plan)
+            logging.exception("Wikipedia disambiguation xatosi:")
+            return ""
+    except Exception:
+        logging.exception("Wikipedia sahifasini olishda xatolik:")
+        return ""
 
-    # ensure equal lengths
+
+def generate_plan_and_contents(topic: str) -> Tuple[List[str], List[str]]:
+    """Reja va matnlarni Wikipedia maqolasidan (AI ishtirokisiz) tuzadi."""
+    content = _fetch_wikipedia_content(topic)
+
+    plan: List[str] = []
+    contents: List[str] = []
+    intro = ""
+    sections: List[Tuple[str, str]] = []
+
+    if content:
+        parts = re.split(r"\n==+\s*(.+?)\s*==+\n", content)
+        intro = _clean_wiki_text(parts[0])
+        for i in range(1, len(parts) - 1, 2):
+            heading = parts[i].strip()
+            body = _clean_wiki_text(parts[i + 1])
+            if heading.lower() in SKIP_WIKI_SECTIONS or len(body) < 50:
+                continue
+            sections.append((heading, body))
+
+    if intro or sections:
+        if intro:
+            plan.append("Kirish")
+            contents.append(intro)
+        for heading, body in sections[:4]:
+            plan.append(heading)
+            contents.append(body)
+
+        closing_source = intro or (sections[0][1] if sections else "")
+        closing = _first_sentences(closing_source, 3) or f"{topic} mavzusi bo'yicha asosiy ma'lumotlar yuqorida keltirildi."
+        plan.append("Xulosa")
+        contents.append(closing)
+    else:
+        plan = ["Kirish", "Asosiy tushunchalar", "Amaliy misollar", "Muammolar va yechimlar", "Xulosa"]
+        contents = [
+            f"'{topic}' mavzusi bo'yicha Wikipedia'da maqola topilmadi. "
+            "Iltimos, mavzuni aniqroq yoki boshqacha nom bilan qayta kiriting."
+        ] * 5
+
     while len(contents) < len(plan):
         contents.append("Ma'lumot yetishmadi — iltimos mavzuni kengroq yozing.")
 
@@ -580,7 +565,7 @@ Matnlar:
 async def cmd_start(message: types.Message, state: FSMContext):
     await state.clear()
     await message.answer(
-        "👋 Salom! Men AI Prezentatsiya Botman.\n\n"
+        "👋 Salom! Men Prezentatsiya Botman.\n\n"
         "Prezentatsiya yaratish uchun mavzu kiriting:"
     )
     await state.set_state(Form.waiting_for_topic)
