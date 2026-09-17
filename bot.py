@@ -23,7 +23,7 @@ from pptx.oxml.ns import qn
 from pptx.oxml.xmlchemy import OxmlElement
 from pptx.util import Inches, Pt
 
-BOT_TOKEN = "8710621594:AAGNoMFolos2L-Df2KPVAQozFsMohqMub-c"
+BOT_TOKEN = ""
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
