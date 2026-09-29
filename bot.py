@@ -24,7 +24,9 @@ from pptx.oxml.ns import qn
 from pptx.oxml.xmlchemy import OxmlElement
 from pptx.util import Inches, Pt
 
-BOT_TOKEN = ""
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+if not BOT_TOKEN:
+    raise SystemExit("BOT_TOKEN environment o'zgaruvchisi o'rnatilmagan (.env.example ga qarang).")
 
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
@@ -534,7 +536,7 @@ def create_presentation_file(topic: str, plan: List[str], content_chunks: List[s
 
 
 # ---------------- GROQ AI CONTENT GENERATION ----------------
-GROQ_API_KEY = "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"
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 GROQ_MODEL = "openai/gpt-oss-120b"
 MIN_SECTIONS = 9  # Kirish + 7 mavzu bandi + Xulosa => kamida 10 slaydga yetadi
 
