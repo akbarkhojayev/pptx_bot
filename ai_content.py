@@ -3,17 +3,18 @@ import json
 import logging
 import os
 import re
+import time
 from typing import List, Optional, Tuple
 
-import wikipedia
-import wikipedia.wikipedia as _wikipedia_internal
+import requests
 from openai import OpenAI
 
 from pptx_builder import DEFAULT_PALETTE, PALETTES
 
-wikipedia.set_lang("uz")
-# Wikimedia rate-limits the library's shared default User-Agent; a distinct one avoids collateral 429s.
-_wikipedia_internal.USER_AGENT = "PptxPresentationBot/1.0 (Telegram content-generation bot)"
+WIKI_API = "https://uz.wikipedia.org/w/api.php"
+# Wikimedia umumiy/anonim User-Agent'larni cheklaydi; o'ziga xos UA va qayta urinishlar 429 xatolaridan saqlaydi.
+WIKI_HEADERS = {"User-Agent": "PptxPresentationBot/1.1 (Telegram presentation bot; python-requests)"}
+_wiki_session = requests.Session()
 
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 GROQ_MODEL = "openai/gpt-oss-120b"
@@ -51,13 +52,14 @@ Slayd turlari va maydonlari:
     3-4 ta element (turlar, tamoyillar, afzalliklar). title ≤ 30 belgi, text 80-140 belgi.
 - "stats": {{"type":"stats","title":"...","items":[{{"value":"...","label":"..."}}, ...],"text":"...","notes":"..."}}
     2-4 ta HAQIQIY raqam. value ≤ 8 belgi (masalan "1991", "8 mlrd", "45%"), label 30-80 belgi,
-    text — raqamlar nimani anglatishi haqida 1-2 gap.
+    text — raqamlar nimani anglatishi haqida 1-2 gap (≤ 250 belgi).
 - "timeline": {{"type":"timeline","title":"...","items":[{{"label":"...","text":"..."}}, ...],"notes":"..."}}
     3-5 ta bosqich yoki sana, xronologik tartibda. label ≤ 12 belgi (yil yoki "1-bosqich"), text 50-110 belgi.
 - "compare": {{"type":"compare","title":"...","left":{{"title":"...","points":[...]}},"right":{{"title":"...","points":[...]}},"notes":"..."}}
     Ikki tomonni taqqoslash (afzallik/kamchilik, oldin/keyin, A va B). Har tomonda 3-4 punkt, 40-90 belgi.
 - "quote": {{"type":"quote","text":"...","author":"...","notes":"..."}}
-    Faqat mavzuga oid HAQIQIY, mashhur iqtibos bo'lsa (≤ 160 belgi). Ishonchingiz komil bo'lmasa — ishlatmang.
+    Faqat mavzuga oid HAQIQIY, mashhur iqtibos bo'lsa (≤ 160 belgi), o'zbek tiliga tarjima qilingan holda.
+    Ishonchingiz komil bo'lmasa — ishlatmang.
 - "conclusion": {{"type":"conclusion","title":"Xulosa","bullets":[...],"highlight":"...","notes":"..."}}
     Oxirgi slayd: 3-5 ta asosiy xulosa.
 
@@ -129,7 +131,7 @@ def _normalize_slide(raw: dict) -> Optional[dict]:
         if len(items) < 2:
             return None
         s["items"] = items
-        s["text"] = _clean(raw.get("text"), 300)
+        s["text"] = _clean(raw.get("text"), 400)
     elif typ == "timeline":
         items = []
         for it in (raw.get("items") or [])[:5]:
@@ -208,7 +210,7 @@ def _generate_with_groq(topic: str, context: str) -> Optional[dict]:
     for kwargs in ({"response_format": {"type": "json_object"}}, {}):
         try:
             resp = _groq_client.chat.completions.create(
-                model=GROQ_MODEL, messages=messages, temperature=0.5, max_tokens=12000, **kwargs,
+                model=GROQ_MODEL, messages=messages, temperature=0.3, max_tokens=12000, **kwargs,
             )
             raw = _extract_json(resp.choices[0].message.content or "")
             deck = normalize_deck(raw, topic)
@@ -224,7 +226,7 @@ def _generate_with_groq(topic: str, context: str) -> Optional[dict]:
 SKIP_WIKI_SECTIONS = {
     "manbalar", "adabiyotlar", "havolalar", "izohlar", "tashqi havolalar",
     "shuningdek qarang", "yana qarang", "eslatmalar", "manba",
-    "qo'shimcha adabiyotlar", "bibliografiya", "izoh",
+    "qo'shimcha adabiyotlar", "bibliografiya", "izoh", "adabiyot", "manbalar ro'yxati",
 }
 _YEAR_RE = re.compile(r"\b(1[0-9]{3}|20[0-9]{2})\b")
 
@@ -240,17 +242,30 @@ def _sentences(text: str) -> List[str]:
     return [s.strip() for s in re.split(r"(?<=[.!?])\s+", text.replace("\n", " ")) if len(s.strip()) > 15]
 
 
-def _fetch_wikipedia_content(topic: str) -> str:
-    try:
-        return wikipedia.page(topic, auto_suggest=True).content
-    except wikipedia.DisambiguationError as e:
+def _wiki_get(params: dict, retries: int = 4) -> Optional[dict]:
+    params = {"format": "json", "formatversion": "2", **params}
+    for attempt in range(retries):
         try:
-            return wikipedia.page(e.options[0], auto_suggest=False).content
-        except Exception:
-            logging.exception("Wikipedia disambiguation xatosi:")
-    except Exception:
-        logging.exception("Wikipedia sahifasini olishda xatolik:")
-    return ""
+            r = _wiki_session.get(WIKI_API, params=params, headers=WIKI_HEADERS, timeout=15)
+            if r.status_code == 429 or r.status_code >= 500:
+                raise RuntimeError(f"HTTP {r.status_code}")
+            return r.json()
+        except Exception as e:
+            logging.warning("Wikipedia so'rovi muvaffaqiyatsiz (%s), %d-urinish", e, attempt + 1)
+            time.sleep(1.5 * (attempt + 1))
+    return None
+
+
+def _fetch_wikipedia_content(topic: str) -> str:
+    """Mavzuga eng mos maqolani qidirib, uning to'liq matnini ("== Bo'lim ==" sarlavhalari bilan) qaytaradi."""
+    data = _wiki_get({"action": "query", "list": "search", "srsearch": topic, "srlimit": 1})
+    hits = (data or {}).get("query", {}).get("search") or []
+    if not hits:
+        return ""
+    data = _wiki_get({"action": "query", "prop": "extracts", "explaintext": 1, "redirects": 1,
+                      "titles": hits[0]["title"]})
+    pages = (data or {}).get("query", {}).get("pages") or []
+    return (pages[0].get("extract") or "") if pages else ""
 
 
 def _section_slide(heading: str, body: str, allow_timeline: bool = True) -> Optional[dict]:
@@ -275,27 +290,41 @@ def _section_slide(heading: str, body: str, allow_timeline: bool = True) -> Opti
     return _normalize_slide(raw)
 
 
-def _generate_from_wikipedia_only(topic: str) -> Optional[dict]:
-    content = _fetch_wikipedia_content(topic)
+MAX_WIKI_SLIDES = 10
+SENTS_PER_SLIDE = 4
+
+
+def _generate_from_wikipedia_only(topic: str, content: str) -> Optional[dict]:
     if not content:
         return None
-    parts = re.split(r"\n==+\s*(.+?)\s*==+\n", content)
+    parts = re.split(r"\n==+\s*(.+?)\s*==+\n", "\n" + content)
     intro = _clean_wiki_text(parts[0])
-    slides = []
-    intro_sents = _sentences(intro)
-    if intro_sents:
-        slides.append(_normalize_slide({"type": "bullets", "title": "Kirish", "bullets": intro_sents[:4],
-                                        "notes": _clean(intro, 1200)}))
+    sections = [("Kirish", intro)] if intro else []
     for i in range(1, len(parts) - 1, 2):
         heading = parts[i].strip()
         body = _clean_wiki_text(parts[i + 1])
-        if heading.lower() in SKIP_WIKI_SECTIONS or len(body) < 80:
-            continue
-        prev_timeline = bool(slides) and slides[-1] is not None and slides[-1]["type"] == "timeline"
-        slides.append(_section_slide(heading, body, allow_timeline=not prev_timeline))
-        if len(slides) >= 10:
+        if heading.lower() not in SKIP_WIKI_SECTIONS and len(body) >= 80:
+            sections.append((heading, body))
+
+    # O'zbekcha maqolalar ko'pincha qisqa bo'limli bo'ladi: uzun bo'limlar bir nechta slaydga bo'linadi,
+    # shunda taqdimot 2-3 slayd bilan qolib ketmaydi.
+    max_parts = 1 if len(sections) >= MAX_WIKI_SLIDES else 3
+    slides: List[dict] = []
+    for heading, body in sections:
+        sents = _sentences(body)
+        chunks = [sents[k:k + SENTS_PER_SLIDE + 1] for k in range(0, len(sents), SENTS_PER_SLIDE + 1)]
+        chunks = [c for c in chunks if len(c) >= 2 or not slides][:max_parts]
+        for n, chunk in enumerate(chunks):
+            title = heading if n == 0 else f"{heading} (davomi)"
+            prev_timeline = bool(slides) and slides[-1]["type"] == "timeline"
+            slide = _section_slide(title, " ".join(chunk), allow_timeline=not prev_timeline)
+            if slide:
+                slides.append(slide)
+            if len(slides) >= MAX_WIKI_SLIDES:
+                break
+        if len(slides) >= MAX_WIKI_SLIDES:
             break
-    slides = [s for s in slides if s]
+    intro_sents = _sentences(intro)
     if not slides:
         return None
     closing = intro_sents[:3] or [f"{topic} mavzusi bo'yicha asosiy ma'lumotlar ko'rib chiqildi."]
@@ -308,11 +337,9 @@ def _generate_from_wikipedia_only(topic: str) -> Optional[dict]:
 
 def generate_deck(topic: str) -> Tuple[Optional[dict], str]:
     """(deck, manba) qaytaradi; manba — "ai" yoki "wikipedia". Hech narsa topilmasa deck = None."""
-    try:
-        context = wikipedia.summary(topic, sentences=8)
-    except Exception:
-        context = ""
+    content = _fetch_wikipedia_content(topic)
+    context = " ".join(_sentences(_clean_wiki_text(content.split("\n==", 1)[0]))[:8])
     deck = _generate_with_groq(topic, context)
     if deck:
         return deck, "ai"
-    return _generate_from_wikipedia_only(topic), "wikipedia"
+    return _generate_from_wikipedia_only(topic, content), "wikipedia"

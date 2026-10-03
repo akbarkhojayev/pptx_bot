@@ -31,6 +31,5 @@ truststore==0.10.4
 typing-inspection==0.4.4
 typing_extensions==4.16.0
 urllib3==2.8.0
-wikipedia==1.4.0
 XlsxWriter==3.2.9
 yarl==1.25.1

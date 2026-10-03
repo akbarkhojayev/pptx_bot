@@ -11,8 +11,24 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import FSInputFile, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove
 
-from ai_content import generate_deck
-from pptx_builder import create_presentation_file, normalize_image
+
+def _load_dotenv(path: str = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")) -> None:
+    """.env faylidagi KALIT=qiymat qatorlarini environment'ga yuklaydi (allaqachon o'rnatilganlarini o'zgartirmaydi)."""
+    if not os.path.exists(path):
+        return
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, value = line.split("=", 1)
+                os.environ.setdefault(key.strip(), value.strip().strip("\"'"))
+
+
+_load_dotenv()
+
+# ai_content GROQ_API_KEY'ni import paytida o'qiydi, shuning uchun .env yuklangandan keyin import qilinadi.
+from ai_content import generate_deck  # noqa: E402
+from pptx_builder import create_presentation_file, normalize_image  # noqa: E402
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
 if not BOT_TOKEN:
