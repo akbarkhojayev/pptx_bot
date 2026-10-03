@@ -3,13 +3,15 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 from typing import List, Optional, Tuple
 
 import requests
+import openai
 from openai import OpenAI
 
-from pptx_builder import DEFAULT_PALETTE, PALETTES
+from pptx_builder import DEFAULT_PALETTE, ICONS, PALETTES
 
 WIKI_API = "https://uz.wikipedia.org/w/api.php"
 # Wikimedia umumiy/anonim User-Agent'larni cheklaydi; o'ziga xos UA va qayta urinishlar 429 xatolaridan saqlaydi.
@@ -21,8 +23,13 @@ GROQ_MODEL = "openai/gpt-oss-120b"
 MIN_CONTENT_SLIDES = 5
 
 _groq_client = OpenAI(api_key=GROQ_API_KEY, base_url="https://api.groq.com/openai/v1") if GROQ_API_KEY else None
+# Groq bepul tarifida daqiqasiga ~8000 token cheklovi bor: bir vaqtda faqat bitta so'rov yuboriladi,
+# cheklovga urilsa kutib qayta urinadi.
+_groq_lock = threading.Lock()
+GROQ_MAX_WAIT = 45
 
-SLIDE_TYPES = ("bullets", "cards", "stats", "timeline", "compare", "quote", "conclusion")
+SLIDE_TYPES = ("bullets", "cards", "stats", "timeline", "compare", "quote", "chart", "process", "table", "conclusion")
+CHART_TYPES = ("column", "bar", "line", "pie", "doughnut")
 
 # ---------------- PROMPTS ----------------
 GROQ_SYSTEM_PROMPT = """Siz "PPT Yordamchi" — professional taqdimot dizayneri va kontent mutaxassisisiz.
@@ -45,11 +52,12 @@ Ushbu mavzu bo'yicha {min_slides}-{max_slides} ta kontent slayddan iborat taqdim
 "rahmat" slaydlari avtomatik qo'shiladi, ularni yozmang).
 
 Slayd turlari va maydonlari:
-- "bullets": {{"type":"bullets","title":"...","bullets":["...", ...],"highlight":"...","notes":"..."}}
+- "bullets": {{"type":"bullets","title":"...","bullets":["...", ...],"highlight":"...","icon":"...","notes":"..."}}
     3-5 ta punkt, har biri 60-110 belgi; "Atama: izoh" ko'rinishi ma'qul. "highlight" — slayddagi eng muhim
-    bitta fikr yoki qiziqarli fakt (90-150 belgi), ixtiyoriy.
-- "cards": {{"type":"cards","title":"...","items":[{{"title":"...","text":"..."}}, ...],"notes":"..."}}
-    3-4 ta element (turlar, tamoyillar, afzalliklar). title ≤ 30 belgi, text 80-140 belgi.
+    bitta fikr yoki qiziqarli fakt (90-150 belgi), ixtiyoriy. "icon" — highlight kartasidagi ikonka.
+- "cards": {{"type":"cards","title":"...","items":[{{"title":"...","text":"...","icon":"..."}}, ...],"notes":"..."}}
+    3-4 ta element (turlar, tamoyillar, afzalliklar). title ≤ 30 belgi, text 80-140 belgi,
+    icon — har bir element ma'nosiga mos, har xil ikonka.
 - "stats": {{"type":"stats","title":"...","items":[{{"value":"...","label":"..."}}, ...],"text":"...","notes":"..."}}
     2-4 ta HAQIQIY raqam. value ≤ 8 belgi (masalan "1991", "8 mlrd", "45%"), label 30-80 belgi,
     text — raqamlar nimani anglatishi haqida 1-2 gap (≤ 250 belgi).
@@ -57,6 +65,17 @@ Slayd turlari va maydonlari:
     3-5 ta bosqich yoki sana, xronologik tartibda. label ≤ 12 belgi (yil yoki "1-bosqich"), text 50-110 belgi.
 - "compare": {{"type":"compare","title":"...","left":{{"title":"...","points":[...]}},"right":{{"title":"...","points":[...]}},"notes":"..."}}
     Ikki tomonni taqqoslash (afzallik/kamchilik, oldin/keyin, A va B). Har tomonda 3-4 punkt, 40-90 belgi.
+- "chart": {{"type":"chart","title":"...","chart_type":"column|bar|line|pie|doughnut","series_name":"...",
+    "categories":["...", ...],"values":[12.5, ...],"unit":"%","insights":["...", ...],"source":"...","notes":"..."}}
+    PowerPoint diagrammasi. Faqat ishonchli, umumga ma'lum raqamlar bo'lsa (3-8 ta qiymat, values — faqat sonlar).
+    Yillar bo'yicha o'zgarish — "line" yoki "column"; ulushlar (yig'indisi 100) — "pie"/"doughnut";
+    reyting/taqqoslash — "bar". category ≤ 18 belgi. unit — o'lchov birligi ("%", "mln", "mlrd $"), bo'lmasa "".
+    insights — diagrammadan 2-3 ta xulosa (50-100 belgi). source — ma'lumot manbasi (masalan "Statista, 2023").
+- "process": {{"type":"process","title":"...","items":[{{"title":"...","text":"..."}}, ...],"notes":"..."}}
+    Ketma-ket jarayon/algoritm/ish tartibi: 3-5 bosqich. title ≤ 20 belgi (qisqa fe'l yoki ot), text 60-120 belgi.
+- "table": {{"type":"table","title":"...","headers":["...", ...],"rows":[["...", ...], ...],"notes":"..."}}
+    Bir nechta mezon bo'yicha taqqoslash jadvali: 3-4 ustun, 3-5 qator. Birinchi ustun — taqqoslanayotgan narsa.
+    Kataklar qisqa (≤ 40 belgi).
 - "quote": {{"type":"quote","text":"...","author":"...","notes":"..."}}
     Faqat mavzuga oid HAQIQIY, mashhur iqtibos bo'lsa (≤ 160 belgi), o'zbek tiliga tarjima qilingan holda.
     Ishonchingiz komil bo'lmasa — ishlatmang.
@@ -65,16 +84,19 @@ Slayd turlari va maydonlari:
 
 Qoidalar:
 1) Birinchi slayd — "Kirish" (bullets), oxirgisi — "conclusion".
-2) Kamida 4 xil turdan foydalaning, bir xil tur ketma-ket 2 martadan ortiq kelmasin.
+2) Kamida 5 xil turdan foydalaning, bir xil tur ketma-ket kelmasin. Mavzuda raqamli ma'lumot bo'lsa, kamida
+   bitta "chart" yoki "stats" bo'lsin; jarayon bo'lsa — "process"; ko'p mezonli taqqoslash bo'lsa — "table".
 3) Slayd sarlavhasi 25-60 belgi, mazmunli (masalan "Python qayerda ishlatiladi?"), oxirida nuqta yo'q.
 4) "notes" — ma'ruzachi shu slaydda og'zaki aytadigan matn: 60-120 so'z, slayddagi punktlarni kengaytiradi.
 5) Markdown belgilaridan (**, #, `) foydalanmang.
-6) "palette" — mavzu ruhiga mos rang palitrasi: {palettes}.
+6) Ikonkalar faqat shu ro'yxatdan tanlanadi (boshqa nom yozmang): {icons}.
+7) "palette" — mavzu ruhiga mos rang palitrasi: {palettes}.
    (masalan: tibbiyot/ekologiya — "teal" yoki "forest", tarix — "terracotta" yoki "berry",
    texnologiya — "ocean" yoki "midnight", biznes — "charcoal" yoki "midnight", san'at — "royal").
 
 Natijani FAQAT bitta JSON obyekt sifatida qaytaring:
-{{"title":"taqdimotning aniq nomi","subtitle":"bir gapli qisqa tavsif (≤ 110 belgi)","palette":"...","slides":[...]}}"""
+{{"title":"taqdimotning aniq nomi","subtitle":"bir gapli qisqa tavsif (≤ 110 belgi)","palette":"...",
+"icon":"mavzuni ifodalovchi ikonka","slides":[...]}}"""
 
 
 # ---------------- CLEANING / VALIDATION ----------------
@@ -100,6 +122,20 @@ def _clean_list(items, limit: int, max_items: int) -> List[str]:
     return [x for x in out if x][:max_items]
 
 
+def _icon(name) -> Optional[str]:
+    name = _clean(name).lower()
+    return name if name in ICONS else None
+
+
+def _number(v) -> Optional[float]:
+    if isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        return float(v)
+    m = re.search(r"-?\d+(?:[.,]\d+)?", str(v or "").replace(" ", ""))
+    return float(m.group(0).replace(",", ".")) if m else None
+
+
 def _normalize_slide(raw: dict) -> Optional[dict]:
     if not isinstance(raw, dict):
         return None
@@ -111,6 +147,7 @@ def _normalize_slide(raw: dict) -> Optional[dict]:
     if typ in ("bullets", "conclusion"):
         s["bullets"] = _clean_list(raw.get("bullets"), 170, 6)
         s["highlight"] = _clean(raw.get("highlight"), 200)
+        s["icon"] = _icon(raw.get("icon"))
         if len(s["bullets"]) < 2:
             return None
         if typ == "conclusion" and not title:
@@ -119,7 +156,8 @@ def _normalize_slide(raw: dict) -> Optional[dict]:
         items = []
         for it in (raw.get("items") or [])[:6]:
             if isinstance(it, dict) and _clean(it.get("title")) and _clean(it.get("text")):
-                items.append({"title": _clean_title(it["title"], 45), "text": _clean(it["text"], 200)})
+                items.append({"title": _clean_title(it["title"], 45), "text": _clean(it["text"], 200),
+                              "icon": _icon(it.get("icon"))})
         if len(items) < 2:
             return None
         s["items"] = items
@@ -151,6 +189,34 @@ def _normalize_slide(raw: dict) -> Optional[dict]:
                 return None
             sides.append({"title": _clean_title(side["title"], 40), "points": points})
         s["left"], s["right"] = sides
+    elif typ == "chart":
+        kind = _clean(raw.get("chart_type")).lower()
+        cats = [_clean(c, 24) for c in (raw.get("categories") or [])][:8]
+        vals = [_number(v) for v in (raw.get("values") or [])][:8]
+        if kind not in CHART_TYPES or len(cats) < 2 or len(cats) != len(vals) or any(v is None for v in vals):
+            return None
+        if kind in ("pie", "doughnut") and any(v <= 0 for v in vals):
+            kind = "bar"
+        s.update(chart_type=kind, categories=cats, values=vals, unit=_clean(raw.get("unit"), 12),
+                 series_name=_clean(raw.get("series_name"), 40), insights=_clean_list(raw.get("insights"), 140, 3),
+                 source=_clean(raw.get("source"), 80))
+    elif typ == "process":
+        items = []
+        for it in (raw.get("items") or [])[:5]:
+            if isinstance(it, dict) and _clean(it.get("title")) and _clean(it.get("text")):
+                items.append({"title": _clean_title(it["title"], 28), "text": _clean(it["text"], 170)})
+        if len(items) < 3:
+            return None
+        s["items"] = items
+    elif typ == "table":
+        headers = _clean_list(raw.get("headers"), 30, 4)
+        rows = []
+        for row in (raw.get("rows") or [])[:6]:
+            if isinstance(row, list) and len(row) >= len(headers):
+                rows.append([_clean(c, 60) or "—" for c in row[:len(headers)]])
+        if len(headers) < 2 or len(rows) < 2:
+            return None
+        s["headers"], s["rows"] = headers, rows
     elif typ == "quote":
         s["text"] = _clean(raw.get("text"), 220).strip("\"“”«»")
         s["author"] = _clean(raw.get("author"), 60)
@@ -176,6 +242,7 @@ def normalize_deck(raw: dict, topic: str) -> Optional[dict]:
         "title": _clean_title(raw.get("title"), 90) or topic,
         "subtitle": _clean(raw.get("subtitle"), 140),
         "palette": palette,
+        "icon": _icon(raw.get("icon")),
         "slides": slides[:14],
     }
 
@@ -195,12 +262,36 @@ def _extract_json(text: str) -> Optional[dict]:
 
 
 # ---------------- GROQ ----------------
+def _retry_after(err: openai.APIStatusError) -> float:
+    header = err.response.headers.get("retry-after") if err.response is not None else None
+    try:
+        return float(header)
+    except (TypeError, ValueError):
+        m = re.search(r"try again in (?:(\d+)m)?([\d.]+)s", str(err))
+        return (int(m.group(1) or 0) * 60 + float(m.group(2))) if m else 20.0
+
+
+def _groq_create(**kwargs):
+    """Tezlik cheklovida (429, yoki TPM bo'yicha 413) kutib qayta urinadi."""
+    for attempt in range(3):
+        try:
+            with _groq_lock:
+                return _groq_client.chat.completions.create(**kwargs)
+        except openai.APIStatusError as e:
+            if not (e.status_code == 429 or (e.status_code == 413 and "rate_limit" in str(e))) or attempt == 2:
+                raise
+            wait = min(GROQ_MAX_WAIT, _retry_after(e) + 1)
+            logging.warning("Groq tezlik cheklovi, %.0f s kutilmoqda", wait)
+            time.sleep(wait)
+
+
 def _generate_with_groq(topic: str, context: str) -> Optional[dict]:
     if _groq_client is None:
         logging.warning("GROQ_API_KEY o'rnatilmagan — Wikipedia zaxirasidan foydalaniladi.")
         return None
     user_prompt = USER_PROMPT_TEMPLATE.format(
         topic=topic, context=context or "—", min_slides=9, max_slides=12, palettes=", ".join(PALETTES),
+        icons=", ".join(ICONS),
     )
     messages = [
         {"role": "system", "content": GROQ_SYSTEM_PROMPT},
@@ -209,8 +300,10 @@ def _generate_with_groq(topic: str, context: str) -> Optional[dict]:
     # Avval JSON rejimida, u xato bersa (model formatni buzsa) oddiy rejimda qayta urinamiz.
     for kwargs in ({"response_format": {"type": "json_object"}}, {}):
         try:
-            resp = _groq_client.chat.completions.create(
-                model=GROQ_MODEL, messages=messages, temperature=0.3, max_tokens=12000, **kwargs,
+            # reasoning_effort="low": token sarfi ~2 baravar kam (bepul tarif limitiga sig'adi) va javob tezroq.
+            resp = _groq_create(
+                model=GROQ_MODEL, messages=messages, temperature=0.3, max_tokens=8000, reasoning_effort="low",
+                **kwargs,
             )
             raw = _extract_json(resp.choices[0].message.content or "")
             deck = normalize_deck(raw, topic)

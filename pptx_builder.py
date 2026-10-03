@@ -16,7 +16,9 @@ from typing import List, Optional, Sequence, Tuple
 from lxml import etree
 from PIL import Image, ImageOps
 from pptx import Presentation
+from pptx.chart.data import CategoryChartData
 from pptx.dml.color import RGBColor
+from pptx.enum.chart import XL_CHART_TYPE, XL_LABEL_POSITION, XL_LEGEND_POSITION, XL_MARKER_STYLE
 from pptx.enum.shapes import MSO_SHAPE
 from pptx.enum.text import MSO_ANCHOR, MSO_AUTO_SIZE, PP_ALIGN
 from pptx.opc.constants import RELATIONSHIP_TYPE as RT
@@ -59,6 +61,16 @@ CH = CB - CY
 GAP = Inches(0.3)
 
 BODY_SIZES = (24, 22, 20, 19, 18, 17, 16, 15, 14)
+
+# Lucide ikonkalari (ISC litsenziya, icons/LICENSE-lucide.txt): oq chiziqli PNG, rangli doira ichiga qo'yiladi.
+ICON_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "icons")
+ICONS = sorted(f[:-4] for f in os.listdir(ICON_DIR) if f.endswith(".png")) if os.path.isdir(ICON_DIR) else []
+
+
+def icon_path(name: Optional[str]) -> Optional[str]:
+    if name and name in ICONS:
+        return os.path.join(ICON_DIR, name + ".png")
+    return None
 SMALL_SIZES = (17, 16, 15, 14, 13)
 
 
@@ -92,7 +104,11 @@ def fit_size(
     """Matn qutiga sig'adigan eng katta shrift o'lchamini (pt) tanlaydi.
     O'rtacha belgi kengligi ~0.5x shrift, qator balandligi ~1.2x shrift x line_spacing
     (LibreOffice'da o'lchangan qiymatlarga moslangan)."""
+    longest_word = max((len(w) for p in paragraphs for w in p.split()), default=0)
     for size in sizes:
+        # Eng uzun so'z ham bitta qatorga sig'ishi kerak, aks holda so'z o'rtasidan bo'linib ketadi.
+        if longest_word * size * char_w * 1.05 > (box_w - indent) / 12700:
+            continue
         if text_height(paragraphs, box_w, size, line_spacing, space_after_ratio, char_w, indent) <= box_h * 0.95:
             return size
     return sizes[-1]
@@ -288,6 +304,21 @@ def add_number_circle(slide, x, y, d, number, fill: str, text_color: str = WHITE
     return c
 
 
+def add_icon_circle(slide, x, y, d, icon: str, fill: str, ring: Optional[str] = None, name: str = "Icon"):
+    """Rangli doira ichida oq ikonka (PNG mavjud bo'lmasa -- None qaytaradi)."""
+    path = icon_path(icon)
+    if not path:
+        return None
+    c = add_box(slide, x, y, d, d, fill, MSO_SHAPE.OVAL, name=f"{name} circle")
+    if ring:
+        c.line.color.rgb = rgb(ring)
+        c.line.width = Pt(max(2, d / 12700 / 40))
+    inner = int(d * 0.54)
+    pic = slide.shapes.add_picture(path, x + (d - inner) // 2, y + (d - inner) // 2, inner, inner)
+    pic.name = name
+    return c
+
+
 def set_gradient_bg(slide, c1: str, c2: str, angle: float):
     fill = slide.background.fill
     fill.gradient()
@@ -423,6 +454,10 @@ class DeckBuilder:
                 name="Decor 1")
         add_box(slide, SW - Inches(2.9), Inches(3.9), Inches(4.4), Inches(4.4), pal["accent"], MSO_SHAPE.OVAL,
                 alpha=22, name="Decor 2")
+        if icon_path(self.deck.get("icon")):
+            d = Inches(2.5)
+            add_icon_circle(slide, SW - Inches(4.15), (SH - d) // 2, d, self.deck["icon"], pal["primary"],
+                            ring=pal["accent"], name="Topic icon")
 
         pill = add_box(slide, Inches(0.85), Inches(1.45), Inches(2.3), Inches(0.42), pal["accent"],
                        MSO_SHAPE.ROUNDED_RECTANGLE, radius=0.5, name="Label")
@@ -534,7 +569,7 @@ class DeckBuilder:
             text_w = Inches(7.45)
             add_bullets(slide, MX, CY, text_w, CH, bullets, pal, char=char)
             card_x = MX + text_w + Inches(0.45)
-            self._highlight_card(slide, card_x, CY, SW - MX - card_x, CH, highlight)
+            self._highlight_card(slide, card_x, CY, SW - MX - card_x, CH, highlight, icon=s.get("icon"))
         else:
             self._numbered_rows(slide, bullets, check)
         return slide
@@ -566,7 +601,7 @@ class DeckBuilder:
             _write_bullets(box.text_frame, [text], size, TEXT, pal["primary"], lead_color=pal["dark"])
             _strip_bullet(box.text_frame.paragraphs[0])
 
-    def _highlight_card(self, slide, x, y, w, h, text: str, compact: bool = False):
+    def _highlight_card(self, slide, x, y, w, h, text: str, compact: bool = False, icon: Optional[str] = None):
         pal = self.pal
         pad = Inches(0.3)
         if not compact:
@@ -583,8 +618,9 @@ class DeckBuilder:
             add_text(slide, tx, ty, tw, th, [text], size=size, color=pal["dark"], italic=True, bold=True,
                      anchor=MSO_ANCHOR.MIDDLE, line_spacing=1.05, autofit=True, name="Highlight")
             return
-        add_text(slide, x + pad, y + Inches(0.2), Inches(1.2), Inches(1.1), ["“"], size=88, color=pal["primary"],
-                 font="Georgia", bold=True, name="Quote mark")
+        if not add_icon_circle(slide, x + pad, y + Inches(0.3), Inches(0.85), icon, pal["primary"]):
+            add_text(slide, x + pad, y + Inches(0.2), Inches(1.2), Inches(1.1), ["“"], size=88,
+                     color=pal["primary"], font="Georgia", bold=True, name="Quote mark")
         tx, tw = x + pad, w - 2 * pad
         ty, th = y + Inches(1.35), h - Inches(1.35) - pad
         size = fit_size([text], tw, th, (24, 22, 20, 19, 18, 17, 16, 15, 14), line_spacing=1.1)
@@ -603,15 +639,21 @@ class DeckBuilder:
         pad = Inches(0.28)
         d = Inches(0.55)
         inner_w = card_w - 2 * pad
-        head_w = inner_w - d - Inches(0.2)
-        head_size = min(fit_size([it["title"]], head_w, Inches(0.8), (22, 20, 19, 18, 17, 16, 15), line_spacing=1.0,
+        # Tor kartochkalarda (4 ta qatorda) ikonka sarlavha ustida turadi, keng kartochkalarda -- yonida.
+        stacked = card_w < Inches(3.3)
+        head_w = inner_w if stacked else inner_w - d - Inches(0.2)
+        head_h = Inches(0.8)
+        head_top = d + Inches(0.15) if stacked else 0
+        head_size = min(fit_size([it["title"]], head_w, head_h, (22, 20, 19, 18, 17, 16, 15), line_spacing=1.0,
                                  char_w=0.55) for it in items)
-        max_text_h = max_card_h - pad * 2 - Inches(0.95)
+        body_off = head_top + head_h + Inches(0.15)
+        max_text_h = max_card_h - pad * 2 - body_off
         text_size = min(fit_size([it["text"]], inner_w, max_text_h, (20, 19, 18, 17, 16, 15, 14), line_spacing=1.1)
                         for it in items)
+        text_size = max(14, min(text_size, head_size))  # matn sarlavhadan katta bo'lmasin
         needed = max(text_height([it["text"]], inner_w, text_size, 1.1) for it in items)
-        text_h = min(max_text_h, int(needed / 0.9) + Inches(0.1))
-        card_h = pad * 2 + Inches(0.95) + text_h
+        text_h = min(max_text_h, int(needed * 1.25) + Inches(0.15))
+        card_h = pad * 2 + body_off + text_h
         y0 = CY + (CH - (rows * card_h + (rows - 1) * GAP)) // 2
         for i, it in enumerate(items):
             r, c = divmod(i, cols)
@@ -619,12 +661,15 @@ class DeckBuilder:
             y = y0 + r * (card_h + GAP)
             add_box(slide, x, y, card_w, card_h, pal["tint"], MSO_SHAPE.ROUNDED_RECTANGLE, radius=0.06,
                     name=f"Card {i + 1}")
-            add_number_circle(slide, x + pad, y + pad + (Inches(0.8) - d) // 2, d, i + 1, pal["primary"])
-            add_text(slide, x + pad + d + Inches(0.2), y + pad, head_w, Inches(0.8), [it["title"]], size=head_size,
-                     color=pal["dark"], bold=True, anchor=MSO_ANCHOR.MIDDLE, line_spacing=1.0,
-                     name=f"Card {i + 1} title")
-            add_text(slide, x + pad, y + pad + Inches(0.95), inner_w, text_h, [it["text"]], size=text_size,
-                     color=TEXT, autofit=True, name=f"Card {i + 1} text")
+            icon_y = y + pad if stacked else y + pad + (head_h - d) // 2
+            if not add_icon_circle(slide, x + pad, icon_y, d, it.get("icon"), pal["primary"], name=f"Card {i + 1} icon"):
+                add_number_circle(slide, x + pad, icon_y, d, i + 1, pal["primary"])
+            head_x = x + pad if stacked else x + pad + d + Inches(0.2)
+            add_text(slide, head_x, y + pad + head_top, head_w, head_h, [it["title"]], size=head_size,
+                     color=pal["dark"], bold=True, anchor=MSO_ANCHOR.TOP if stacked else MSO_ANCHOR.MIDDLE,
+                     line_spacing=1.0, name=f"Card {i + 1} title")
+            add_text(slide, x + pad, y + pad + body_off, inner_w, text_h, [it["text"]], size=text_size,
+                     color=TEXT, name=f"Card {i + 1} text")
         return slide
 
     def stats_slide(self, s: dict):
@@ -653,7 +698,7 @@ class DeckBuilder:
                      font=self.head, bold=True, anchor=MSO_ANCHOR.BOTTOM, line_spacing=1.0,
                      name=f"Stat {i + 1} value")
             add_text(slide, x + pad, y + pad + val_h + Inches(0.1), inner_w, label_h, [it["label"]], size=label_size,
-                     color=TEXT, line_spacing=1.05, autofit=True, name=f"Stat {i + 1} label")
+                     color=TEXT, line_spacing=1.05, name=f"Stat {i + 1} label")
         if text:
             ty = y + card_h + Inches(0.4)
             add_text(slide, MX, ty, CW, CB - ty, [text], size=text_size, color=TEXT, line_spacing=1.15, autofit=True,
@@ -673,7 +718,7 @@ class DeckBuilder:
         text_size = min(fit_size([it["text"]], col_w - Inches(0.1), max_text_h, (20, 19, 18, 17, 16, 15, 14),
                                  line_spacing=1.1) for it in items)
         needed = max(text_height([it["text"]], col_w - Inches(0.1), text_size, 1.1) for it in items)
-        text_h = min(max_text_h, int(needed / 0.9) + Inches(0.1))
+        text_h = min(max_text_h, int(needed * 1.25) + Inches(0.15))
         label_y = CY + (CH - head_h - text_h) // 2
         line_y = label_y + label_h + Inches(0.3)
         text_y = line_y + dot + Inches(0.35)
@@ -687,7 +732,7 @@ class DeckBuilder:
             add_box(slide, x + Inches(0.09), line_y + Inches(0.09), dot - Inches(0.18), dot - Inches(0.18), WHITE,
                     MSO_SHAPE.OVAL, name=f"Step {i + 1} dot center")
             add_text(slide, x, text_y, col_w - Inches(0.1), text_h, [it["text"]], size=text_size, color=TEXT,
-                     autofit=True, name=f"Step {i + 1} text")
+                     name=f"Step {i + 1} text")
         return slide
 
     def compare_slide(self, s: dict):
@@ -722,6 +767,213 @@ class DeckBuilder:
             _write_bullets(box.text_frame, side["points"], size, TEXT, color, lead_color=pal["dark"])
         return slide
 
+    def _series_colors(self) -> List[str]:
+        pal = self.pal
+        return [pal["primary"], pal["accent"], mix(pal["primary"], WHITE, 0.45), pal["dark"],
+                mix(pal["accent"], pal["dark"], 0.35), mix(pal["primary"], pal["accent"], 0.5), MUTED,
+                mix(pal["dark"], WHITE, 0.6)]
+
+    def chart_slide(self, s: dict):
+        """PowerPoint'ning o'z (tahrirlanadigan) diagrammasi + o'ng tomonda xulosalar kartasi."""
+        pal = self.pal
+        slide = self._content_slide(s["title"])
+        kind = s["chart_type"]
+        xl_type = {
+            "column": XL_CHART_TYPE.COLUMN_CLUSTERED, "bar": XL_CHART_TYPE.BAR_CLUSTERED,
+            "line": XL_CHART_TYPE.LINE_MARKERS, "pie": XL_CHART_TYPE.PIE, "doughnut": XL_CHART_TYPE.DOUGHNUT,
+        }[kind]
+        data = CategoryChartData()
+        data.categories = s["categories"]
+        data.add_series(s.get("series_name") or s["title"], s["values"])
+
+        insights = s.get("insights") or []
+        chart_w = Inches(7.7) if insights else CW
+        gf = slide.shapes.add_chart(xl_type, MX, CY, chart_w, CH, data)
+        gf.name = "Chart"
+        chart = gf.chart
+        chart.has_title = False
+        chart.font.size = Pt(13)
+        chart.font.name = FONT_BODY
+        chart.font.color.rgb = rgb(TEXT)
+        plot = chart.plots[0]
+        plot.has_data_labels = True
+        labels = plot.data_labels
+        labels.font.size = Pt(13)
+        labels.font.bold = True
+        unit = s.get("unit") or ""
+        sep = "" if unit in ("%", "‰") else " "
+        labels.number_format = f'General"{sep}{unit}"' if unit else "General"
+        labels.number_format_is_linked = False
+        labels.show_value = True
+        labels.show_category_name = False
+        labels.show_legend_key = False
+        labels.show_percentage = False
+        series = plot.series[0]
+        colors = self._series_colors()
+
+        if kind in ("pie", "doughnut"):
+            chart.has_legend = True
+            chart.legend.position = XL_LEGEND_POSITION.RIGHT
+            chart.legend.include_in_layout = False
+            chart.legend.font.size = Pt(14)
+            labels.position = XL_LABEL_POSITION.OUTSIDE_END if kind == "pie" else XL_LABEL_POSITION.CENTER
+            labels.font.color.rgb = rgb(TEXT if kind == "pie" else WHITE)
+            for idx, point in enumerate(series.points):
+                point.format.fill.solid()
+                point.format.fill.fore_color.rgb = rgb(colors[idx % len(colors)])
+                point.format.line.color.rgb = rgb(WHITE)
+        else:
+            chart.has_legend = False
+            labels.position = XL_LABEL_POSITION.OUTSIDE_END if kind != "line" else XL_LABEL_POSITION.ABOVE
+            if len(s["values"]) > 6:
+                labels.font.size = Pt(11)
+            labels.font.color.rgb = rgb(pal["dark"])
+            if kind == "line":
+                series.format.line.color.rgb = rgb(pal["primary"])
+                series.format.line.width = Pt(3.5)
+                series.smooth = False
+                series.marker.style = XL_MARKER_STYLE.CIRCLE
+                series.marker.size = 10
+                series.marker.format.fill.solid()
+                series.marker.format.fill.fore_color.rgb = rgb(pal["primary"])
+                series.marker.format.line.color.rgb = rgb(WHITE)
+            else:
+                plot.gap_width = 70
+                series.format.fill.solid()
+                series.format.fill.fore_color.rgb = rgb(pal["primary"])
+            va, ca = chart.value_axis, chart.category_axis
+            va.has_major_gridlines = True
+            va.major_gridlines.format.line.color.rgb = rgb("E5E7EB")
+            va.format.line.fill.background()
+            va.tick_labels.font.size = Pt(12)
+            va.tick_labels.font.color.rgb = rgb(MUTED)
+            ca.format.line.color.rgb = rgb("D1D5DB")
+            ca.tick_labels.font.size = Pt(13)
+            ca.tick_labels.font.color.rgb = rgb(TEXT)
+            if min(s["values"]) >= 0 and kind != "line":
+                va.minimum_scale = 0
+            if kind == "line" and len(s["values"]) > 5:
+                # Ko'p nuqtali chiziqda yozuvlar bir-birini bosadi -- qiymatlar o'qdan o'qiladi.
+                plot.has_data_labels = False
+                va.tick_labels.font.size = Pt(13)
+                va.tick_labels.number_format = labels.number_format
+                va.tick_labels.number_format_is_linked = False
+            if kind == "bar":
+                # Gorizontal diagrammada birinchi kategoriya tepada turishi uchun; qiymatlar yozuvda bor.
+                ca.reverse_order = True
+                va.visible = False
+                va.has_major_gridlines = False
+
+        if insights:
+            x = MX + chart_w + Inches(0.4)
+            w = SW - MX - x
+            pad = Inches(0.3)
+            inner_w = w - 2 * pad
+            head_h = Inches(0.5)
+            size = fit_size(insights, inner_w, CH - 2 * pad - head_h, (20, 19, 18, 17, 16, 15, 14), 1.1, 0.6,
+                            indent=Pt(22))
+            needed = text_height(insights, inner_w, size, 1.1, 0.6, indent=Pt(size * 1.1))
+            h = min(CH, int(needed / 0.9) + 2 * pad + head_h)
+            y = CY + (CH - h) // 2
+            add_box(slide, x, y, w, h, pal["tint"], MSO_SHAPE.ROUNDED_RECTANGLE, radius=0.06, name="Insights card")
+            add_text(slide, x + pad, y + pad, inner_w, head_h - Inches(0.1), ["Asosiy xulosalar"], size=14,
+                     color=pal["primary"], bold=True, name="Insights heading")
+            box = slide.shapes.add_textbox(x + pad, y + pad + head_h, inner_w, h - 2 * pad - head_h)
+            box.name = "Insights"
+            _prep_frame(box.text_frame, autofit=True)
+            _write_bullets(box.text_frame, insights, size, TEXT, pal["primary"], lead_color=pal["dark"])
+        if s.get("source"):
+            add_text(slide, MX, Inches(6.98), Inches(9), Inches(0.3), ["Manba: " + s["source"]], size=10,
+                     color=MUTED, italic=True, name="Source")
+        return slide
+
+    def process_slide(self, s: dict):
+        """Bosqichma-bosqich jarayon: strelka (chevron) shakllari va ostida izohlar."""
+        pal = self.pal
+        slide = self._content_slide(s["title"])
+        items = s["items"]
+        n = len(items)
+        overlap = Inches(0.12)
+        step_w = (CW + overlap * (n - 1)) // n
+        arrow_h = Inches(1.05)
+        tip = Inches(0.35)
+        title_w = step_w - tip * 2 - Inches(0.25)
+        title_size = min(fit_size([it["title"]], title_w, arrow_h - Inches(0.2), (20, 18, 17, 16, 15, 14),
+                                  line_spacing=1.0, char_w=0.52) for it in items)
+        col_w = step_w - overlap - Inches(0.25)
+        max_text_h = CH - arrow_h - Inches(0.35)
+        text_size = min(fit_size([it["text"]], col_w, max_text_h, (20, 19, 18, 17, 16, 15, 14), line_spacing=1.1)
+                        for it in items)
+        needed = max(text_height([it["text"]], col_w, text_size, 1.1) for it in items)
+        text_h = min(max_text_h, int(needed * 1.25) + Inches(0.15))
+        y0 = CY + (CH - arrow_h - Inches(0.35) - text_h) // 2
+        for i, it in enumerate(items):
+            x = MX + i * (step_w - overlap)
+            shape = MSO_SHAPE.PENTAGON if i == 0 else MSO_SHAPE.CHEVRON
+            color = mix(pal["primary"], pal["dark"], i / max(1, n - 1) * 0.6)
+            arrow = add_box(slide, x, y0, step_w, arrow_h, color, shape, name=f"Step {i + 1}")
+            tf = arrow.text_frame
+            # Chevron shaklining matn maydoni uchlarini o'zi chiqarib tashlaydi -- qo'shimcha chekka kerak emas.
+            _prep_frame(tf, MSO_ANCHOR.MIDDLE, margin=Inches(0.04))
+            p = tf.paragraphs[0]
+            p.alignment = PP_ALIGN.CENTER
+            p.line_spacing = 1.0
+            r = p.add_run()
+            r.text = it["title"]
+            _style_run(r, title_size, WHITE, self.head, bold=True)
+            tx = x + (Inches(0.1) if i == 0 else tip)
+            add_text(slide, tx, y0 + arrow_h + Inches(0.35), col_w, text_h, [it["text"]], size=text_size, color=TEXT,
+                     name=f"Step {i + 1} text")
+        return slide
+
+    def table_slide(self, s: dict):
+        pal = self.pal
+        slide = self._content_slide(s["title"])
+        headers, rows = s["headers"], s["rows"]
+        n_cols, n_rows = len(headers), len(rows) + 1
+        col_w = CW // n_cols
+        cell_pad = Inches(0.12)
+        size = 16
+        min_row = Inches(0.62)
+        for size in (20, 19, 18, 17, 16, 15, 14, 13):
+            heights = [max(min_row, max(text_height([c], col_w - 2 * cell_pad, size, 1.05,
+                                                    char_w=0.5 if r == 0 else 0.45) for c in row)
+                           + 2 * cell_pad + Pt(4))
+                       for r, row in enumerate([headers] + rows)]
+            if sum(heights) <= CH:
+                break
+        total_h = min(CH, sum(heights))
+        y = CY + (CH - total_h) // 2
+        gf = slide.shapes.add_table(n_rows, n_cols, MX, y, CW, total_h)
+        gf.name = "Table"
+        table = gf.table
+        table.first_row = True
+        table.horz_banding = False
+        for c in range(n_cols):
+            table.columns[c].width = col_w if c < n_cols - 1 else CW - col_w * (n_cols - 1)
+        for r in range(n_rows):
+            table.rows[r].height = int(heights[r])
+            for c in range(n_cols):
+                cell = table.cell(r, c)
+                text = headers[c] if r == 0 else rows[r - 1][c]
+                cell.fill.solid()
+                if r == 0:
+                    cell.fill.fore_color.rgb = rgb(pal["primary"])
+                else:
+                    cell.fill.fore_color.rgb = rgb(pal["tint"] if r % 2 else WHITE)
+                cell.margin_left = cell.margin_right = cell.margin_top = cell.margin_bottom = cell_pad
+                cell.vertical_anchor = MSO_ANCHOR.MIDDLE
+                tf = cell.text_frame
+                tf.word_wrap = True
+                p = tf.paragraphs[0]
+                run = p.add_run()
+                run.text = text
+                if r == 0:
+                    _style_run(run, size, WHITE, bold=True)
+                else:
+                    _style_run(run, size, pal["dark"] if c == 0 else TEXT, bold=(c == 0))
+        return slide
+
     def quote_slide(self, s: dict):
         pal = self.pal
         slide = self._new(5)
@@ -740,6 +992,21 @@ class DeckBuilder:
         return slide
 
     # -------- assemble --------
+    def _guarded(self, fn):
+        """Slaydni chizadi; xato bo'lsa chala qolgan slaydni o'chirib, None qaytaradi."""
+        before, page = len(self.prs.slides), self.page
+        try:
+            return fn()
+        except Exception:
+            logging.exception("Slayd chizishda xatolik")
+            id_list = self.prs.slides._sldIdLst
+            while len(self.prs.slides) > before:
+                sld_id = id_list[-1]
+                self.prs.part.drop_rel(sld_id.rId)
+                id_list.remove(sld_id)
+            self.page = page
+            return None
+
     def build(self, slide_images: List[str], large_images: List[str]) -> Presentation:
         slides = self.deck["slides"]
         self.title_slide()
@@ -767,25 +1034,21 @@ class DeckBuilder:
             "timeline": lambda s, i: self.timeline_slide(s),
             "compare": lambda s, i: self.compare_slide(s),
             "quote": lambda s, i: self.quote_slide(s),
+            "chart": lambda s, i: self.chart_slide(s),
+            "process": lambda s, i: self.process_slide(s),
+            "table": lambda s, i: self.table_slide(s),
         }
         for i, s in enumerate(slides):
             for path in big_at.get(i, []):
-                try:
-                    self.image_slide(path, s.get("title") or self.topic)
-                except Exception:
-                    logging.exception("Katta rasm slaydini qo'shib bo'lmadi")
-            try:
-                slide = renderers[s["type"]](s, i)
-            except Exception:
-                logging.exception("Slayd (%s) chizishda xatolik, oddiy ko'rinishga o'tildi", s.get("type"))
+                self._guarded(lambda: self.image_slide(path, s.get("title") or self.topic))
+            slide = self._guarded(lambda: renderers[s["type"]](s, i))
+            if slide is None:
+                logging.warning("Slayd (%s) oddiy ko'rinishga o'tkazildi", s.get("type"))
                 slide = self.bullets_slide({"title": s.get("title") or self.topic,
                                             "bullets": _fallback_bullets(s)})
             set_notes(slide, s.get("notes", ""))
         for path in big_at.get(len(slides), []):
-            try:
-                self.image_slide(path, self.topic)
-            except Exception:
-                logging.exception("Katta rasm slaydini qo'shib bo'lmadi")
+            self._guarded(lambda: self.image_slide(path, self.topic))
         self.end_slide()
 
         cp = self.prs.core_properties
@@ -803,6 +1066,11 @@ def _fallback_bullets(s: dict) -> List[str]:
                                          it.get("text") or it.get("label")) if v))
     if s.get("text"):
         out.append(s["text"])
+    for cat, val in zip(s.get("categories") or [], s.get("values") or []):
+        out.append(f"{cat}: {val:g} {s.get('unit') or ''}".strip())
+    for row in s.get("rows") or []:
+        out.append(": ".join([row[0], ", ".join(row[1:])]))
+    out.extend(s.get("insights") or [])
     return out[:6] or ["—"]
 
 
